@@ -1,0 +1,32 @@
+# Generated reports and logs
+reports/*
+!reports/.gitkeep
+*.log
+*.tmp
+*.bak
+
+# SetupHub generated outputs
+SetupHub_Report_*.html
+SetupHub_Report_*.csv
+SetupHub_Report_*.json
+SetupHub_Log_*.txt
+SetupHub_SystemInventory_*.json
+SetupHub_InstalledSoftware_*.csv
+SetupHub_CatalogAudit_*.json
+SetupHub_CatalogAudit_*.csv
+SetupHub_ManualUnsupported_*.json
+SetupHub_ManualUnsupported_*.csv
+winget-logs/
+
+# Archives and release artifacts
+*.zip
+*.7z
+*.rar
+
+# Windows noise
+Thumbs.db
+Desktop.ini
+
+# Editor folders
+.vscode/
+.idea/
