@@ -808,7 +808,7 @@ $btnCredits.Add_Click({
     } else {
         $msg = "SetupHub v$script:AppVersion`n`nAuthor: $script:AuthorName`nEmail: $script:AuthorEmail`nWebsite: $script:AuthorWebsite`n`nLicense: $script:LicenseName ($script:LicenseSpdx)`n`nLicense note: SetupHub is released under a restrictive copyleft license. If you distribute a modified version, you must keep the same GPL-3.0-only license, preserve copyright/license notices, state the changes made, and provide the source code of the distributed version.`n`nPowered by Microsoft WinGet / Windows Package Manager. Package availability and licenses remain under their respective vendors. Microsoft 365 Apps / Office requires a valid Microsoft license/account."
     }
-    [System.Windows.MessageBox]::Show($msg, (TT 'CreditsTitle'), 'OK', 'Information') | Out-Null
+    [System.Windows.MessageBox]::Show($msg, (T 'CreditsTitle'), 'OK', 'Information') | Out-Null
 })
 $cmbLanguage.Add_SelectionChanged({
     $selected = $cmbLanguage.SelectedItem
