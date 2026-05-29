@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./assets/screenshots/logo.png" alt="SetupHub logo" width="720">
+</p>
+
 # SetupHub
 
 **SetupHub** is a lightweight Windows workstation setup tool built around WinGet, Microsoft Store packages, software profiles, bloatware cleanup, and deployment reporting.
