@@ -254,6 +254,7 @@ Created and maintained by **Pietro Melillo**.
 
 - Email: `melillopietro@gmail.com`
 - Website: `https://melillopietro.github.io/`
+- Linkedin `https://it.linkedin.com/in/melillopietro`
 
 ---
 
