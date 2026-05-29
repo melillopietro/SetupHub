@@ -5,7 +5,7 @@
 It is meant for the practical moment everyone in IT knows well: a fresh or recently reinstalled Windows machine, a list of tools to install, a few unwanted apps to remove, and the need to leave behind a clear report of what was done.
 
 <p align="center">
-  <img src="assets/screenshots/setuphub-main.png" alt="SetupHub main window" width="850">
+  <img src="assets/screenshots/setuphub-main.png" alt="SetupHub main window" width="900">
 </p>
 
 <p align="center">
@@ -40,25 +40,41 @@ The tool does not bundle third-party installers. Package resolution and installa
 
 ## Screenshots
 
-Add your screenshots to `assets/screenshots/` using the following names:
+The screenshots below show the main workflow: selecting a software profile, validating the catalog, running the deployment, and reviewing the generated inventory/report.
 
-```text
-assets/screenshots/setuphub-main.png
-assets/screenshots/setuphub-profile.png
-assets/screenshots/setuphub-report.png
-assets/screenshots/setuphub-inventory.png
-assets/screenshots/setuphub-credits.png
-```
+> The image files are stored in `assets/screenshots/`. Keep the names exactly as shown below: GitHub paths are case-sensitive.
 
-Recommended README layout:
+### Main interface
 
-```md
-![SetupHub main window](assets/screenshots/setuphub-main.png)
-![Profile management](assets/screenshots/setuphub-profile.png)
-![Deployment report](assets/screenshots/setuphub-report.png)
-```
+<p align="center">
+  <img src="assets/screenshots/setuphub-main.png" alt="SetupHub main interface" width="900">
+</p>
 
-Before publishing screenshots, remove or blur private information such as serial numbers, internal hostnames, public IP addresses, private IP addresses, MAC addresses, usernames, and report paths.
+### Profile selection and custom profiles
+
+<p align="center">
+  <img src="assets/screenshots/setuphub-profiles.png" alt="SetupHub profiles" width="900">
+</p>
+
+### Catalog validation
+
+<p align="center">
+  <img src="assets/screenshots/setuphub-catalog-validation.png" alt="SetupHub catalog validation" width="900">
+</p>
+
+### Deployment report
+
+<p align="center">
+  <img src="assets/screenshots/setuphub-report.png" alt="SetupHub deployment report" width="900">
+</p>
+
+### Hardware and software inventory
+
+<p align="center">
+  <img src="assets/screenshots/setuphub-inventory.png" alt="SetupHub hardware and software inventory" width="900">
+</p>
+
+Before publishing screenshots, remove or blur private information such as serial numbers, internal hostnames, public IP addresses, private IP addresses, MAC addresses, usernames, and local report paths.
 
 ---
 
