@@ -5,7 +5,7 @@
 It was created for a very practical IT scenario: a fresh or recently reinstalled Windows machine, a list of applications to install, a few unwanted preinstalled apps to remove, and the need to leave behind a clear report of what was done.
 
 <p align="center">
-  <img src="./assets/screenshots/setuphub-main.png" alt="SetupHub main interface" width="900">
+   <img src="./assets/screenshots/setuphub-main.png" alt="SetupHub main interface" width="900">
 </p>
 
 <p align="center">
