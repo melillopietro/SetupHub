@@ -12,6 +12,8 @@
     Requires Windows 10 1909+ / Windows 11, PowerShell 5.1+, Administrator privileges and WinGet.
     v1.1 includes:
     - Automatic Windows App Runtime 1.8+ bootstrap to resolve 0x80073CF3 dependency errors.
+    - Automatic AppX environment repair to resolve 0x80073CF9 staging errors.
+    - Zero-crash resilient bootstrap with permission-safe AppX discovery.
     - Full CLI / Unattended deployment mode (-NoGui, -Profile, -CreateRestorePoint, etc.).
     - Real-time search and category filtering in GUI.
     - System Restore Point creation option.
@@ -34,7 +36,7 @@ param(
 )
 
 #region === BASE CONFIGURATION ===
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'
 $script:AppName = 'SetupHub'
 $script:AppVersion = '1.1'
 $script:LicenseName = 'GNU General Public License v3.0 only'
@@ -47,27 +49,33 @@ $script:DefaultLanguage = 'it'
 $script:ProfileFolder = Join-Path $PSScriptRoot 'profiles'
 $script:ReportFolder = Join-Path $PSScriptRoot 'reports'
 $script:WingetLogFolder = Join-Path $script:ReportFolder 'winget-logs'
-New-Item -Path $script:ProfileFolder -ItemType Directory -Force | Out-Null
-New-Item -Path $script:ReportFolder -ItemType Directory -Force | Out-Null
-New-Item -Path $script:WingetLogFolder -ItemType Directory -Force | Out-Null
+$script:WinGetAvailable = $true
+$script:WinGetWarningMsg = ''
+
+try { New-Item -Path $script:ProfileFolder -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+try { New-Item -Path $script:ReportFolder -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+try { New-Item -Path $script:WingetLogFolder -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
 #endregion
 
 #region === ASSEMBLIES ===
-Add-Type -AssemblyName PresentationFramework
-Add-Type -AssemblyName PresentationCore
-Add-Type -AssemblyName WindowsBase
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName Microsoft.VisualBasic
+try {
+    Add-Type -AssemblyName PresentationFramework -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName PresentationCore -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName WindowsBase -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction SilentlyContinue
+} catch {}
 #endregion
 
 #region === ELEVATION & OS GUARD ===
+$scriptPath = if ($PSCommandPath) { $PSCommandPath } elseif ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path } else { Join-Path $PSScriptRoot 'SetupHub_Setup.ps1' }
 $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     if ($NoGui) {
         Write-Error "SetupHub richiede privilegi di amministratore. Eseguire PowerShell come Amministratore."
         exit 1
     }
-    $passArgs = "-ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`""
+    $passArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
     if ($Profile) { $passArgs += " -Profile `"$Profile`"" }
     if ($NoGui) { $passArgs += " -NoGui" }
     if ($Silent) { $passArgs += " -Silent" }
@@ -76,8 +84,12 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
     if ($NoInventory) { $passArgs += " -NoInventory" }
     if ($NoReport) { $passArgs += " -NoReport" }
     if ($Language) { $passArgs += " -Language `"$Language`"" }
-    Start-Process powershell.exe -Verb RunAs -ArgumentList $passArgs
-    exit
+    try {
+        Start-Process powershell.exe -Verb RunAs -ArgumentList $passArgs
+    } catch {
+        [System.Windows.MessageBox]::Show("Impossibile richiedere i privilegi di amministratore:`n$($_.Exception.Message)", "Errore Privilegi", 'OK', 'Error') | Out-Null
+    }
+    exit 0
 }
 
 $osBuild = [System.Environment]::OSVersion.Version.Build
@@ -124,6 +136,7 @@ $script:Text = @{
         RestorePointOk = 'Punto di ripristino creato con successo'
         RestorePointFailed = 'Creazione punto di ripristino non riuscita'
         PendingRebootBanner = 'Attenzione: riavvio di sistema pendente rilevato! Si consiglia di riavviare prima del deployment.'
+        WinGetWarningBanner = 'Attenzione: WinGet non risulta pienamente configurato nel sistema. L''installazione software potrebbe fallire, ma puoi procedere con debloating e inventario.'
         SearchInstallPlaceholder = 'Cerca software per nome o ID...'
         SearchBloatPlaceholder = 'Cerca bloatware...'
         CategoryAll = 'Tutte le categorie'
@@ -188,6 +201,7 @@ $script:Text = @{
         RestorePointOk = 'System restore point created successfully'
         RestorePointFailed = 'System restore point creation failed'
         PendingRebootBanner = 'Warning: pending system reboot detected! A system restart is recommended before deployment.'
+        WinGetWarningBanner = 'Warning: WinGet is not fully configured on this machine. Software installation might fail, but debloating and inventory are available.'
         SearchInstallPlaceholder = 'Search software by name or ID...'
         SearchBloatPlaceholder = 'Search bloatware...'
         CategoryAll = 'All categories'
@@ -231,7 +245,95 @@ $script:Text = @{
 function T([string]$Key) { return $script:Text[$script:Lang][$Key] }
 #endregion
 
-#region === SYSTEM RESILIENCE HELPERS ===
+#region === SYSTEM RESILIENCE & APPX REPAIR ===
+function Repair-AppXEnvironment {
+    try {
+        # 1. Ricrea le cartelle di sistema necessarie ad AppX (la cui mancanza provoca l'errore 0x80073CF9)
+        $requiredDirs = @(
+            "$env:SystemRoot\AppReadiness",
+            "$env:SystemRoot\AUInstallAgent",
+            "$env:LOCALAPPDATA\Microsoft\WindowsApps"
+        )
+        foreach ($d in $requiredDirs) {
+            if (-not (Test-Path $d)) {
+                try { New-Item -Path $d -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+            }
+        }
+
+        # 2. Avvia e abilita i servizi di installazione e AppX essenziali
+        $services = @('AppReadiness', 'AppXSvc', 'ClipSVC', 'InstallService', 'wuauserv')
+        foreach ($s in $services) {
+            try {
+                $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
+                if ($svc) {
+                    if ($svc.StartType -eq 'Disabled') {
+                        Set-Service -Name $s -StartupType Manual -ErrorAction SilentlyContinue
+                    }
+                    if ($svc.Status -ne 'Running') {
+                        Start-Service -Name $s -ErrorAction SilentlyContinue
+                    }
+                }
+            } catch {}
+        }
+    } catch {}
+}
+
+function Resolve-WinGetEnvironment {
+    # 1. Check if winget is already available in current PATH
+    try {
+        $cmd = Get-Command winget -ErrorAction SilentlyContinue
+        if ($cmd) {
+            $ver = (& winget --version 2>$null)
+            if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
+        }
+    } catch {}
+
+    # 2. Check Appx package installation path (official, permission-safe API)
+    try {
+        $appx = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($appx -and $appx.InstallLocation) {
+            $wingetExe = Join-Path $appx.InstallLocation 'winget.exe'
+            if (Test-Path $wingetExe) {
+                $env:PATH = "$($appx.InstallLocation);$env:PATH"
+                $ver = (& winget --version 2>$null)
+                if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
+            }
+        }
+    } catch {}
+
+    # 3. Check LOCALAPPDATA WindowsApps
+    try {
+        $localApps = "$env:LOCALAPPDATA\Microsoft\WindowsApps"
+        if (Test-Path "$localApps\winget.exe") {
+            $env:PATH = "$localApps;$env:PATH"
+            $ver = (& winget --version 2>$null)
+            if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
+        }
+    } catch {}
+
+    # 4. Check all user profile WindowsApps directories (useful when elevated as different admin)
+    try {
+        $userProfiles = Get-ChildItem -Path "$env:SystemDrive\Users" -Directory -ErrorAction SilentlyContinue
+        if ($userProfiles) {
+            foreach ($u in $userProfiles) {
+                $userWinApps = "$($u.FullName)\AppData\Local\Microsoft\WindowsApps"
+                if (Test-Path "$userWinApps\winget.exe") {
+                    $env:PATH = "$userWinApps;$env:PATH"
+                    $ver = (& winget --version 2>$null)
+                    if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
+                }
+            }
+        }
+    } catch {}
+
+    return $false
+}
+
+function Test-WinGetAvailable {
+    Repair-AppXEnvironment
+    return (Resolve-WinGetEnvironment)
+}
+
 function Test-PendingReboot {
     try {
         $cbs = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
@@ -284,7 +386,7 @@ $installPackages = @(
     @{ Name = 'Slack'; Id = 'SlackTechnologies.Slack'; Category = 'Communication'; Checked = $false; Profiles = @('Business','Developer') }
     @{ Name = 'WhatsApp'; Id = '9NKSQGP7F2NH'; Source = 'msstore'; Category = 'Communication'; Checked = $true; Profiles = @('Essential','Business','Home'); SkipSilent = $true; Notes = 'Microsoft Store package ID for WhatsApp Desktop. Requires Microsoft Store source to be available.' }
     @{ Name = 'Telegram Desktop'; Id = 'Telegram.TelegramDesktop'; Category = 'Communication'; Checked = $true; Profiles = @('Essential','Cybersecurity','Home') }
-    @{ Name = 'Discord'; Id = 'Discord.Discord'; Category = 'Communication'; Checked = $false; Profiles = @('Gaming','Home') }
+    @{ Name = 'Discord'; Id = 'Discord.Discord'; Category = 'Gaming','Home' }
 
     # Office / Productivity
     @{ Name = 'Microsoft 365 Apps / Office'; Id = 'Microsoft.Office'; Category = 'Office'; Checked = $false; Profiles = @('Business'); SkipSilent = $true }
@@ -413,97 +515,7 @@ $bloatwarePackages = @(
 )
 #endregion
 
-#region === WINGET BOOTSTRAP (WITH WINDOWS APP RUNTIME FIX & ASYNC DISCOVERY) ===
-function Resolve-WinGetEnvironment {
-    # 1. Check if winget is already available in current PATH
-    try {
-        $cmd = Get-Command winget -ErrorAction SilentlyContinue
-        if ($cmd) {
-            $ver = (& winget --version 2>$null)
-            if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
-        }
-    } catch {}
-
-    # 2. Check LOCALAPPDATA WindowsApps
-    $localApps = "$env:LOCALAPPDATA\Microsoft\WindowsApps"
-    if (Test-Path "$localApps\winget.exe") {
-        $env:PATH = "$localApps;$env:PATH"
-        try {
-            $ver = (& winget --version 2>$null)
-            if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
-        } catch {}
-    }
-
-    # 3. Check all user profiles for WindowsApps (useful when running elevated as different admin)
-    try {
-        $userProfiles = Get-ChildItem -Path "$env:SystemDrive\Users" -Directory -ErrorAction SilentlyContinue
-        foreach ($u in $userProfiles) {
-            $userWinApps = "$($u.FullName)\AppData\Local\Microsoft\WindowsApps"
-            if (Test-Path "$userWinApps\winget.exe") {
-                $env:PATH = "$userWinApps;$env:PATH"
-                try {
-                    $ver = (& winget --version 2>$null)
-                    if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
-                } catch {}
-            }
-        }
-    } catch {}
-
-    # 4. Check Program Files WindowsApps directory
-    try {
-        $winAppsDirs = Get-ChildItem -Path "$env:ProgramFiles\WindowsApps" -Filter 'Microsoft.DesktopAppInstaller_*' -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
-        foreach ($d in $winAppsDirs) {
-            $candidate = Join-Path $d.FullName 'winget.exe'
-            if (Test-Path $candidate) {
-                $env:PATH = "$($d.FullName);$env:PATH"
-                try {
-                    $ver = (& winget --version 2>$null)
-                    if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
-                } catch {}
-            }
-        }
-    } catch {}
-
-    return $false
-}
-
-function Repair-AppXEnvironment {
-    try {
-        # 1. Ricrea le cartelle di sistema necessarie a AppX (la cui mancanza provoca l'errore 0x80073CF9)
-        $requiredDirs = @(
-            "$env:SystemRoot\AppReadiness",
-            "$env:SystemRoot\AUInstallAgent",
-            "$env:LOCALAPPDATA\Microsoft\WindowsApps"
-        )
-        foreach ($d in $requiredDirs) {
-            if (-not (Test-Path $d)) {
-                New-Item -Path $d -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
-            }
-        }
-
-        # 2. Avvia e abilita i servizi di installazione e AppX essenziali
-        $services = @('AppReadiness', 'AppXSvc', 'ClipSVC', 'InstallService', 'wuauserv')
-        foreach ($s in $services) {
-            try {
-                $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
-                if ($svc) {
-                    if ($svc.StartType -eq 'Disabled') {
-                        Set-Service -Name $s -StartupType Manual -ErrorAction SilentlyContinue
-                    }
-                    if ($svc.Status -ne 'Running') {
-                        Start-Service -Name $s -ErrorAction SilentlyContinue
-                    }
-                }
-            } catch {}
-        }
-    } catch {}
-}
-
-function Test-WinGetAvailable {
-    Repair-AppXEnvironment
-    return (Resolve-WinGetEnvironment)
-}
-
+#region === WINGET BOOTSTRAP (NON-BLOCKING & RESILIENT) ===
 function Install-WinGetBootstrap {
     param([bool]$ShowGui = $true)
     Repair-AppXEnvironment
@@ -567,8 +579,10 @@ function Install-WinGetBootstrap {
         # 1. Microsoft VCLibs
         Update-Splash -Status "Configurazione componenti di base (1/4)" -Detail "Download e installazione Microsoft VCLibs..."
         $vcLibsPath = "$env:TEMP\Microsoft.VCLibs.x64.14.00.Desktop.appx"
-        Invoke-WebRequest -Uri 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx' -OutFile $vcLibsPath -UseBasicParsing -TimeoutSec 60
-        Add-AppxPackage -Path $vcLibsPath -ErrorAction SilentlyContinue
+        try {
+            Invoke-WebRequest -Uri 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx' -OutFile $vcLibsPath -UseBasicParsing -TimeoutSec 60
+            Add-AppxPackage -Path $vcLibsPath -ErrorAction SilentlyContinue
+        } catch {}
         Update-Splash -Status "Configurazione componenti di base (1/4)" -Detail "Microsoft VCLibs installato."
 
         # 2. Microsoft Windows App SDK / Windows App Runtime 1.8+ (risolve l'errore 0x80073CF3 di DesktopAppInstaller)
@@ -588,33 +602,37 @@ function Install-WinGetBootstrap {
 
         # 3. Microsoft DesktopAppInstaller (WinGet) da GitHub Releases
         Update-Splash -Status "Download WinGet Package Manager (3/4)" -Detail "Recupero dell'ultima release di DesktopAppInstaller da GitHub..."
-        $latestRelease = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -UseBasicParsing -TimeoutSec 30
-        $msixBundleAsset = $latestRelease.assets | Where-Object { $_.name -match '\.msixbundle$' } | Select-Object -First 1
-        $licenseAsset = $latestRelease.assets | Where-Object { $_.name -match 'License.*\.xml$' } | Select-Object -First 1
-        $msixPath = "$env:TEMP\Microsoft.DesktopAppInstaller.msixbundle"
-        
-        Update-Splash -Status "Download WinGet Package Manager (3/4)" -Detail "Scaricamento del pacchetto MSIXBundle ($($msixBundleAsset.name))..."
-        Invoke-WebRequest -Uri $msixBundleAsset.browser_download_url -OutFile $msixPath -UseBasicParsing -TimeoutSec 180
-
-        Repair-AppXEnvironment
-        if ($licenseAsset) {
-            $licensePath = "$env:TEMP\WinGet_License.xml"
-            Invoke-WebRequest -Uri $licenseAsset.browser_download_url -OutFile $licensePath -UseBasicParsing -TimeoutSec 30
-            try {
-                Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -ErrorAction Stop | Out-Null
-            } catch {
-                Repair-AppXEnvironment
-                Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -ErrorAction SilentlyContinue | Out-Null
-            }
-        }
-        Update-Splash -Status "Registrazione WinGet nel sistema (3/4)" -Detail "Installazione del pacchetto DesktopAppInstaller..."
         try {
-            Add-AppxPackage -Path $msixPath -ForceApplicationShutdown -ErrorAction Stop
-        } catch {
-            Repair-AppXEnvironment
-            Start-Sleep -Seconds 1
-            Add-AppxPackage -Path $msixPath -ForceApplicationShutdown -ErrorAction SilentlyContinue
-        }
+            $latestRelease = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -UseBasicParsing -TimeoutSec 30
+            $msixBundleAsset = $latestRelease.assets | Where-Object { $_.name -match '\.msixbundle$' } | Select-Object -First 1
+            $licenseAsset = $latestRelease.assets | Where-Object { $_.name -match 'License.*\.xml$' } | Select-Object -First 1
+            $msixPath = "$env:TEMP\Microsoft.DesktopAppInstaller.msixbundle"
+            
+            if ($msixBundleAsset) {
+                Update-Splash -Status "Download WinGet Package Manager (3/4)" -Detail "Scaricamento del pacchetto MSIXBundle ($($msixBundleAsset.name))..."
+                Invoke-WebRequest -Uri $msixBundleAsset.browser_download_url -OutFile $msixPath -UseBasicParsing -TimeoutSec 180
+
+                Repair-AppXEnvironment
+                if ($licenseAsset) {
+                    $licensePath = "$env:TEMP\WinGet_License.xml"
+                    Invoke-WebRequest -Uri $licenseAsset.browser_download_url -OutFile $licensePath -UseBasicParsing -TimeoutSec 30
+                    try {
+                        Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -ErrorAction Stop | Out-Null
+                    } catch {
+                        Repair-AppXEnvironment
+                        Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -ErrorAction SilentlyContinue | Out-Null
+                    }
+                }
+                Update-Splash -Status "Registrazione WinGet nel sistema (3/4)" -Detail "Installazione del pacchetto DesktopAppInstaller..."
+                try {
+                    Add-AppxPackage -Path $msixPath -ForceApplicationShutdown -ErrorAction Stop
+                } catch {
+                    Repair-AppXEnvironment
+                    Start-Sleep -Seconds 1
+                    Add-AppxPackage -Path $msixPath -ForceApplicationShutdown -ErrorAction SilentlyContinue
+                }
+            }
+        } catch {}
         
         # 4. Aggiorna PATH e reimposta sorgenti WinGet
         Update-Splash -Status "Finalizzazione ambiente (4/4)" -Detail "Aggiornamento variabili d'ambiente e sorgenti..."
@@ -625,28 +643,22 @@ function Install-WinGetBootstrap {
             & winget source reset --force 2>$null | Out-Null
         } catch {}
     } catch {
-        if ($splashWindow) { $splashWindow.Close() }
-        $errMsg = "Errore durante l'installazione di WinGet:`n$($_.Exception.Message)"
-        if ($ShowGui) {
-            [System.Windows.MessageBox]::Show($errMsg, 'Errore Bootstrap', 'OK', 'Error') | Out-Null
-        } else {
-            Write-Error $errMsg
-        }
-        exit 1
+        $script:WinGetWarningMsg = $_.Exception.Message
+        Write-Warning "Avviso bootstrap WinGet: $($_.Exception.Message)"
     }
-    if ($splashWindow) { $splashWindow.Close() }
-    Start-Sleep -Milliseconds 500
-    if (-not (Test-WinGetAvailable)) {
-        $warnMsg = 'WinGet non risulta disponibile dopo il bootstrap. Riavviare il PC e riprovare.'
-        if ($ShowGui) {
-            [System.Windows.MessageBox]::Show($warnMsg, 'WinGet non trovato', 'OK', 'Warning') | Out-Null
-        } else {
-            Write-Warning $warnMsg
-        }
-        exit 1
-    }
+    
+    if ($splashWindow) { try { $splashWindow.Close() } catch {} }
+    Start-Sleep -Milliseconds 300
+    
+    $script:WinGetAvailable = Test-WinGetAvailable
 }
-if (-not (Test-WinGetAvailable)) { Install-WinGetBootstrap -ShowGui (-not $NoGui) }
+
+# Run bootstrap check gracefully (never aborts or exits)
+if (-not (Test-WinGetAvailable)) {
+    Install-WinGetBootstrap -ShowGui (-not $NoGui)
+} else {
+    $script:WinGetAvailable = $true
+}
 #endregion
 
 #region === SHARED DEPLOYMENT SCRIPTBLOCK ===
@@ -814,6 +826,7 @@ $deploymentScript = {
 
     function Invoke-AppxDebloat {
         param([string]$PackageFamilyName,[string]$PackageName,[string]$FriendlyName)
+        Repair-AppXEnvironment
         $installed = @()
         $provisioned = @()
         $messages = New-Object System.Collections.Generic.List[string]
@@ -1405,6 +1418,7 @@ $xaml = @"
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="220"/>
@@ -1438,8 +1452,13 @@ $xaml = @"
             <TextBlock x:Name="lblPendingReboot" Text="Attenzione: riavvio di sistema pendente rilevato! Si consiglia di riavviare prima del deployment." Foreground="#11111b" FontWeight="Bold" FontSize="12" HorizontalAlignment="Center"/>
         </Border>
 
+        <!-- WinGet Status Warning Banner -->
+        <Border x:Name="bannerWinGetWarning" Grid.Row="2" Background="#f9e2af" Padding="10,6" Visibility="Collapsed">
+            <TextBlock x:Name="lblWinGetWarning" Text="Attenzione: WinGet non e disponibile. Le funzioni di debloating e inventario restano attive." Foreground="#11111b" FontWeight="SemiBold" FontSize="11" HorizontalAlignment="Center"/>
+        </Border>
+
         <!-- Main Panels -->
-        <Grid Grid.Row="2" Margin="12,10,12,6">
+        <Grid Grid.Row="3" Margin="12,10,12,6">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="1.4*"/>
                 <ColumnDefinition Width="12"/>
@@ -1500,7 +1519,7 @@ $xaml = @"
         </Grid>
 
         <!-- Action Row -->
-        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,6,0,8">
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,6,0,8">
             <StackPanel Orientation="Horizontal" Margin="0,0,24,0" VerticalAlignment="Center">
                 <CheckBox x:Name="chkReport" Content="Genera report HTML/CSV" Foreground="#cdd6f4" IsChecked="True" Margin="0,0,16,0"/>
                 <CheckBox x:Name="chkRestorePoint" Content="Crea punto di ripristino" Foreground="#cdd6f4" IsChecked="True"/>
@@ -1510,7 +1529,7 @@ $xaml = @"
         </StackPanel>
 
         <!-- Status & Log -->
-        <Border Grid.Row="4" Background="#11111b" Margin="12,0,12,8" CornerRadius="8" Padding="10">
+        <Border Grid.Row="5" Background="#11111b" Margin="12,0,12,8" CornerRadius="8" Padding="10">
             <DockPanel>
                 <StackPanel DockPanel.Dock="Top" Margin="0,0,0,6">
                     <TextBlock x:Name="lblCurrentOp" Text="In attesa di avvio..." Foreground="#a6adc8" FontSize="12" Margin="0,0,0,4"/>
@@ -1522,7 +1541,7 @@ $xaml = @"
         </Border>
 
         <!-- Footer -->
-        <Border Grid.Row="5" Background="#181825" Padding="10,6">
+        <Border Grid.Row="6" Background="#181825" Padding="10,6">
             <TextBlock x:Name="lblFooter" Text="Creato da Pietro Melillo | Powered by WinGet | SetupHub v1.1" Foreground="#6c7086" FontSize="10" HorizontalAlignment="Center"/>
         </Border>
     </Grid>
@@ -1567,6 +1586,8 @@ $txtSearchBloat = $window.FindName('txtSearchBloat')
 $cmbCategoryFilter = $window.FindName('cmbCategoryFilter')
 $bannerPendingReboot = $window.FindName('bannerPendingReboot')
 $lblPendingReboot = $window.FindName('lblPendingReboot')
+$bannerWinGetWarning = $window.FindName('bannerWinGetWarning')
+$lblWinGetWarning = $window.FindName('lblWinGetWarning')
 #endregion
 
 #region === DYNAMIC ITEM GENERATION & FILTERING ===
@@ -1728,6 +1749,7 @@ function Set-UILanguage {
     $lblCurrentOp.Text = T 'Pending'
     $lblFooter.Text = T 'Footer'
     $lblPendingReboot.Text = T 'PendingRebootBanner'
+    $lblWinGetWarning.Text = T 'WinGetWarningBanner'
     Populate-CategoryFilter
 }
 
@@ -1830,6 +1852,9 @@ Set-UILanguage
 
 if (Test-PendingReboot) {
     $bannerPendingReboot.Visibility = [System.Windows.Visibility]::Visible
+}
+if (-not $script:WinGetAvailable) {
+    $bannerWinGetWarning.Visibility = [System.Windows.Visibility]::Visible
 }
 #endregion
 
@@ -1975,5 +2000,9 @@ $window.Add_Closed({
 #endregion
 
 #region === LAUNCH ===
-$window.ShowDialog() | Out-Null
+try {
+    $window.ShowDialog() | Out-Null
+} catch {
+    [System.Windows.MessageBox]::Show("Errore durante l'apertura dell'interfaccia SetupHub:`n$($_.Exception.Message)", "Errore Avvio", 'OK', 'Error') | Out-Null
+}
 #endregion
