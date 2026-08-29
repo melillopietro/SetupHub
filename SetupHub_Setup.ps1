@@ -413,42 +413,114 @@ $bloatwarePackages = @(
 )
 #endregion
 
-#region === WINGET BOOTSTRAP (WITH WINDOWS APP RUNTIME FIX) ===
-function Test-WinGetAvailable {
+#region === WINGET BOOTSTRAP (WITH WINDOWS APP RUNTIME FIX & ASYNC DISCOVERY) ===
+function Resolve-WinGetEnvironment {
+    # 1. Check if winget is already available in current PATH
     try {
-        $null = Get-Command winget -ErrorAction Stop
-        $version = (winget --version 2>$null)
-        return ($null -ne $version)
-    } catch { return $false }
+        $cmd = Get-Command winget -ErrorAction SilentlyContinue
+        if ($cmd) {
+            $ver = (& winget --version 2>$null)
+            if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
+        }
+    } catch {}
+
+    # 2. Check LOCALAPPDATA WindowsApps
+    $localApps = "$env:LOCALAPPDATA\Microsoft\WindowsApps"
+    if (Test-Path "$localApps\winget.exe") {
+        $env:PATH = "$localApps;$env:PATH"
+        try {
+            $ver = (& winget --version 2>$null)
+            if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
+        } catch {}
+    }
+
+    # 3. Check all user profiles for WindowsApps (useful when running elevated as different admin)
+    try {
+        $userProfiles = Get-ChildItem -Path "$env:SystemDrive\Users" -Directory -ErrorAction SilentlyContinue
+        foreach ($u in $userProfiles) {
+            $userWinApps = "$($u.FullName)\AppData\Local\Microsoft\WindowsApps"
+            if (Test-Path "$userWinApps\winget.exe") {
+                $env:PATH = "$userWinApps;$env:PATH"
+                try {
+                    $ver = (& winget --version 2>$null)
+                    if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
+                } catch {}
+            }
+        }
+    } catch {}
+
+    # 4. Check Program Files WindowsApps directory
+    try {
+        $winAppsDirs = Get-ChildItem -Path "$env:ProgramFiles\WindowsApps" -Filter 'Microsoft.DesktopAppInstaller_*' -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+        foreach ($d in $winAppsDirs) {
+            $candidate = Join-Path $d.FullName 'winget.exe'
+            if (Test-Path $candidate) {
+                $env:PATH = "$($d.FullName);$env:PATH"
+                try {
+                    $ver = (& winget --version 2>$null)
+                    if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
+                } catch {}
+            }
+        }
+    } catch {}
+
+    return $false
+}
+
+function Test-WinGetAvailable {
+    return (Resolve-WinGetEnvironment)
 }
 
 function Install-WinGetBootstrap {
     param([bool]$ShowGui = $true)
     $splashWindow = $null
+    $lblSplashStatus = $null
+    $lblSplashDetail = $null
+    $splashProgressBar = $null
+
+    function Update-Splash {
+        param([string]$Status, [string]$Detail = '', [double]$Progress = -1)
+        if ($splashWindow) {
+            if ($lblSplashStatus) { $lblSplashStatus.Text = $Status }
+            if ($lblSplashDetail) { $lblSplashDetail.Text = $Detail }
+            if ($splashProgressBar -and $Progress -ge 0) {
+                $splashProgressBar.IsIndeterminate = $false
+                $splashProgressBar.Value = $Progress
+            }
+            [System.Windows.Forms.Application]::DoEvents()
+            try { [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background) } catch {}
+        } else {
+            Write-Host "$Status $Detail" -ForegroundColor Cyan
+        }
+    }
+
     if ($ShowGui) {
         $splashXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Preparazione ambiente..." Height="210" Width="470"
+        Title="Preparazione ambiente..." Height="230" Width="500"
         WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
         WindowStyle="ToolWindow" Background="#1e1e2e">
-    <StackPanel VerticalAlignment="Center" Margin="30">
-        <TextBlock Text="Installazione / verifica WinGet in corso..."
-                   Foreground="#cdd6f4" FontSize="16" FontWeight="SemiBold"
-                   HorizontalAlignment="Center" Margin="0,0,0,15"/>
-        <ProgressBar IsIndeterminate="True" Height="6" Foreground="#89b4fa"
-                     Background="#313244" BorderThickness="0"/>
-        <TextBlock Text="Download dei componenti Microsoft e Windows App Runtime"
+    <StackPanel VerticalAlignment="Center" Margin="25">
+        <TextBlock x:Name="lblSplashStatus" Text="Inizializzazione WinGet..."
+                   Foreground="#cdd6f4" FontSize="15" FontWeight="SemiBold"
+                   HorizontalAlignment="Center" Margin="0,0,0,10" TextWrapping="Wrap" TextAlignment="Center"/>
+        <ProgressBar x:Name="splashProgressBar" IsIndeterminate="True" Height="7" Foreground="#89b4fa"
+                     Background="#313244" BorderThickness="0" Margin="0,0,0,10"/>
+        <TextBlock x:Name="lblSplashDetail" Text="Verifica e installazione componenti necessari..."
                    Foreground="#a6adc8" FontSize="11" HorizontalAlignment="Center"
-                   Margin="0,12,0,0"/>
+                   TextWrapping="Wrap" TextAlignment="Center"/>
     </StackPanel>
 </Window>
 "@
         try {
             $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($splashXaml))
             $splashWindow = [System.Windows.Markup.XamlReader]::Load($reader)
+            $lblSplashStatus = $splashWindow.FindName('lblSplashStatus')
+            $lblSplashDetail = $splashWindow.FindName('lblSplashDetail')
+            $splashProgressBar = $splashWindow.FindName('splashProgressBar')
             $splashWindow.Show()
-            [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+            Update-Splash -Status "Preparazione ambiente..." -Detail "Verifica preliminare dei prerequisiti..."
         } catch {}
     } else {
         Write-Host "Installazione e configurazione WinGet / Windows App Runtime in corso..." -ForegroundColor Cyan
@@ -458,50 +530,52 @@ function Install-WinGetBootstrap {
         $progressPreference = 'SilentlyContinue'
         
         # 1. Microsoft VCLibs
+        Update-Splash -Status "Configurazione componenti di base (1/4)" -Detail "Download e installazione Microsoft VCLibs..."
         $vcLibsPath = "$env:TEMP\Microsoft.VCLibs.x64.14.00.Desktop.appx"
-        Invoke-WebRequest -Uri 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx' -OutFile $vcLibsPath -UseBasicParsing
+        Invoke-WebRequest -Uri 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx' -OutFile $vcLibsPath -UseBasicParsing -TimeoutSec 60
         Add-AppxPackage -Path $vcLibsPath -ErrorAction SilentlyContinue
+        Update-Splash -Status "Configurazione componenti di base (1/4)" -Detail "Microsoft VCLibs installato."
 
         # 2. Microsoft Windows App SDK / Windows App Runtime 1.8+ (risolve l'errore 0x80073CF3 di DesktopAppInstaller)
+        Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Download Microsoft Windows App Runtime 1.8..."
         $wasdkInstaller = "$env:TEMP\WindowsAppRuntimeInstall-x64.exe"
         try {
-            Invoke-WebRequest -Uri 'https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe' -OutFile $wasdkInstaller -UseBasicParsing
+            Invoke-WebRequest -Uri 'https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe' -OutFile $wasdkInstaller -UseBasicParsing -TimeoutSec 120
             if (Test-Path $wasdkInstaller) {
-                Start-Process -FilePath $wasdkInstaller -ArgumentList '--quiet' -Wait -ErrorAction SilentlyContinue
+                Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Esecuzione installatore runtime in background..."
+                $p = Start-Process -FilePath $wasdkInstaller -ArgumentList '--quiet' -PassThru
+                while (-not $p.HasExited) {
+                    Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Installazione del runtime Microsoft in corso..."
+                    Start-Sleep -Milliseconds 500
+                }
             }
         } catch {}
 
-        # 3. Microsoft UI Xaml (legacy fallback per compatibilità)
-        try {
-            $uiXamlUrl = 'https://www.nuget.org/api/v2/package/Microsoft.UI.Xaml/2.8.6'
-            $uiXamlPath = "$env:TEMP\microsoft.ui.xaml.2.8.6.nupkg.zip"
-            $uiXamlExtract = "$env:TEMP\microsoft.ui.xaml"
-            Invoke-WebRequest -Uri $uiXamlUrl -OutFile $uiXamlPath -UseBasicParsing
-            Expand-Archive -Path $uiXamlPath -DestinationPath $uiXamlExtract -Force
-            $uiXamlAppx = Get-ChildItem -Path "$uiXamlExtract\tools\AppX\x64\Release\" -Filter '*.appx' -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($uiXamlAppx) { Add-AppxPackage -Path $uiXamlAppx.FullName -ErrorAction SilentlyContinue }
-        } catch {}
-
-        # 4. Microsoft DesktopAppInstaller (WinGet) da GitHub Releases
-        $latestRelease = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -UseBasicParsing
+        # 3. Microsoft DesktopAppInstaller (WinGet) da GitHub Releases
+        Update-Splash -Status "Download WinGet Package Manager (3/4)" -Detail "Recupero dell'ultima release di DesktopAppInstaller da GitHub..."
+        $latestRelease = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -UseBasicParsing -TimeoutSec 30
         $msixBundleAsset = $latestRelease.assets | Where-Object { $_.name -match '\.msixbundle$' } | Select-Object -First 1
         $licenseAsset = $latestRelease.assets | Where-Object { $_.name -match 'License.*\.xml$' } | Select-Object -First 1
         $msixPath = "$env:TEMP\Microsoft.DesktopAppInstaller.msixbundle"
-        Invoke-WebRequest -Uri $msixBundleAsset.browser_download_url -OutFile $msixPath -UseBasicParsing
+        
+        Update-Splash -Status "Download WinGet Package Manager (3/4)" -Detail "Scaricamento del pacchetto MSIXBundle ($($msixBundleAsset.name))..."
+        Invoke-WebRequest -Uri $msixBundleAsset.browser_download_url -OutFile $msixPath -UseBasicParsing -TimeoutSec 180
 
         if ($licenseAsset) {
             $licensePath = "$env:TEMP\WinGet_License.xml"
-            Invoke-WebRequest -Uri $licenseAsset.browser_download_url -OutFile $licensePath -UseBasicParsing
+            Invoke-WebRequest -Uri $licenseAsset.browser_download_url -OutFile $licensePath -UseBasicParsing -TimeoutSec 30
             Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -ErrorAction SilentlyContinue
         }
+        Update-Splash -Status "Registrazione WinGet nel sistema (3/4)" -Detail "Installazione del pacchetto DesktopAppInstaller..."
         Add-AppxPackage -Path $msixPath -ForceApplicationShutdown
         
-        # 5. Aggiorna PATH e reimposta sorgenti WinGet
+        # 4. Aggiorna PATH e reimposta sorgenti WinGet
+        Update-Splash -Status "Finalizzazione ambiente (4/4)" -Detail "Aggiornamento variabili d'ambiente e sorgenti..."
         $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('PATH','User')
-        Start-Sleep -Seconds 2
+        [void](Resolve-WinGetEnvironment)
+        Start-Sleep -Seconds 1
         try {
             & winget source reset --force 2>$null | Out-Null
-            & winget source update 2>$null | Out-Null
         } catch {}
     } catch {
         if ($splashWindow) { $splashWindow.Close() }
@@ -514,9 +588,9 @@ function Install-WinGetBootstrap {
         exit 1
     }
     if ($splashWindow) { $splashWindow.Close() }
-    Start-Sleep -Seconds 2
+    Start-Sleep -Milliseconds 500
     if (-not (Test-WinGetAvailable)) {
-        $warnMsg = 'WinGet non risulta disponibile. Riavviare il PC e riprovare.'
+        $warnMsg = 'WinGet non risulta disponibile dopo il bootstrap. Riavviare il PC e riprovare.'
         if ($ShowGui) {
             [System.Windows.MessageBox]::Show($warnMsg, 'WinGet non trovato', 'OK', 'Warning') | Out-Null
         } else {
