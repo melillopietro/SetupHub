@@ -278,37 +278,69 @@ function Repair-AppXEnvironment {
     } catch {}
 }
 
-function Resolve-WinGetEnvironment {
-    # 1. Inietta nel PATH le cartelle di installazione di WindowsAppRuntime e VCLibs per garantire il caricamento delle DLL a runtime
+$script:WinGetExePath = 'winget'
+
+function Test-WinGetBinary {
+    param([string]$Path = 'winget')
     try {
-        $wasdk = Get-AppxPackage -Name '*WindowsAppRuntime*' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
-        if ($wasdk -and $wasdk.InstallLocation) {
-            if (-not $env:PATH.Contains($wasdk.InstallLocation)) { $env:PATH = "$($wasdk.InstallLocation);$env:PATH" }
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $Path
+        $psi.Arguments = '--version'
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        if ($p.WaitForExit(3500)) {
+            $stdout = $p.StandardOutput.ReadToEnd()
+            $stderr = $p.StandardError.ReadToEnd()
+            $combined = ($stdout + " " + $stderr).Trim()
+            if ($p.ExitCode -eq 0 -or $combined -match '\d+\.\d+' -or $combined -match 'v\d+') {
+                return $true
+            }
+        } else {
+            try { $p.Kill() } catch {}
         }
-        $vclibs = Get-AppxPackage -Name '*VCLibs*' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
-        if ($vclibs -and $vclibs.InstallLocation) {
-            if (-not $env:PATH.Contains($vclibs.InstallLocation)) { $env:PATH = "$($vclibs.InstallLocation);$env:PATH" }
+    } catch {}
+    return $false
+}
+
+function Resolve-WinGetEnvironment {
+    # 1. Inietta nel PATH le cartelle di installazione di WindowsAppRuntime e VCLibs
+    try {
+        $wasdkList = Get-AppxPackage -Name '*WindowsAppRuntime*' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending
+        foreach ($w in $wasdkList) {
+            if ($w.InstallLocation -and -not $env:PATH.Contains($w.InstallLocation)) {
+                $env:PATH = "$($w.InstallLocation);$env:PATH"
+            }
+        }
+        $vclibsList = Get-AppxPackage -Name '*VCLibs*' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending
+        foreach ($v in $vclibsList) {
+            if ($v.InstallLocation -and -not $env:PATH.Contains($v.InstallLocation)) {
+                $env:PATH = "$($v.InstallLocation);$env:PATH"
+            }
         }
     } catch {}
 
-    # 2. Check if winget is already working in current PATH
-    try {
-        $cmd = Get-Command winget -ErrorAction SilentlyContinue
-        if ($cmd) {
-            $ver = (& winget --version 2>$null)
-            if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
-        }
-    } catch {}
+    # 2. Test standard PATH
+    if (Test-WinGetBinary -Path 'winget') {
+        $script:WinGetExePath = 'winget'
+        return $true
+    }
 
     # 3. Check Appx package installation path for AllUsers (official, permission-safe API)
     try {
-        $appx = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
-        if ($appx -and $appx.InstallLocation) {
-            $wingetExe = Join-Path $appx.InstallLocation 'winget.exe'
-            if (Test-Path $wingetExe) {
-                if (-not $env:PATH.Contains($appx.InstallLocation)) { $env:PATH = "$($appx.InstallLocation);$env:PATH" }
-                $ver = (& winget --version 2>$null)
-                if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
+        $appxList = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending
+        foreach ($appx in $appxList) {
+            if ($appx -and $appx.InstallLocation) {
+                $candidate = Join-Path $appx.InstallLocation 'winget.exe'
+                if (Test-Path $candidate) {
+                    if (-not $env:PATH.Contains($appx.InstallLocation)) { $env:PATH = "$($appx.InstallLocation);$env:PATH" }
+                    if (Test-WinGetBinary -Path $candidate) {
+                        $script:WinGetExePath = $candidate
+                        return $true
+                    }
+                }
             }
         }
     } catch {}
@@ -316,24 +348,43 @@ function Resolve-WinGetEnvironment {
     # 4. Check LOCALAPPDATA WindowsApps
     try {
         $localApps = "$env:LOCALAPPDATA\Microsoft\WindowsApps"
-        if (Test-Path "$localApps\winget.exe") {
+        $candidate = Join-Path $localApps 'winget.exe'
+        if (Test-Path $candidate) {
             if (-not $env:PATH.Contains($localApps)) { $env:PATH = "$localApps;$env:PATH" }
-            $ver = (& winget --version 2>$null)
-            if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
+            if (Test-WinGetBinary -Path $candidate) {
+                $script:WinGetExePath = $candidate
+                return $true
+            }
         }
     } catch {}
 
-    # 5. Check all user profile WindowsApps directories (useful when elevated as different admin)
+    # 5. Check all user profile WindowsApps directories
     try {
         $userProfiles = Get-ChildItem -Path "$env:SystemDrive\Users" -Directory -ErrorAction SilentlyContinue
         if ($userProfiles) {
             foreach ($u in $userProfiles) {
                 $userWinApps = "$($u.FullName)\AppData\Local\Microsoft\WindowsApps"
-                if (Test-Path "$userWinApps\winget.exe") {
+                $candidate = Join-Path $userWinApps 'winget.exe'
+                if (Test-Path $candidate) {
                     if (-not $env:PATH.Contains($userWinApps)) { $env:PATH = "$userWinApps;$env:PATH" }
-                    $ver = (& winget --version 2>$null)
-                    if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
+                    if (Test-WinGetBinary -Path $candidate) {
+                        $script:WinGetExePath = $candidate
+                        return $true
+                    }
                 }
+            }
+        }
+    } catch {}
+
+    # 6. Fallback: Se winget.exe esiste fisicamente in WindowsApps, consideralo disponibile
+    try {
+        $appx = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+        if ($appx -and $appx.InstallLocation) {
+            $candidate = Join-Path $appx.InstallLocation 'winget.exe'
+            if (Test-Path $candidate) {
+                $script:WinGetExePath = $candidate
+                if (-not $env:PATH.Contains($appx.InstallLocation)) { $env:PATH = "$($appx.InstallLocation);$env:PATH" }
+                return $true
             }
         }
     } catch {}
@@ -786,7 +837,7 @@ $deploymentScript = {
         if ($Action -eq 'install' -and -not $SkipSilent) { $argsList += ' --silent' }
 
         $procInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $procInfo.FileName = 'winget'
+        $procInfo.FileName = if ($script:WinGetExePath) { $script:WinGetExePath } else { 'winget' }
         $procInfo.Arguments = $argsList
         $procInfo.RedirectStandardOutput = $true
         $procInfo.RedirectStandardError = $true
@@ -816,8 +867,9 @@ $deploymentScript = {
 
     function Invoke-ProcessCapture {
         param([string]$FileName,[string]$Arguments)
+        $targetFile = if ($FileName -eq 'winget' -and $script:WinGetExePath) { $script:WinGetExePath } else { $FileName }
         $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $FileName
+        $psi.FileName = $targetFile
         $psi.Arguments = $Arguments
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
@@ -956,7 +1008,7 @@ $deploymentScript = {
     Write-LogLine '========================================='
     try {
         $srcInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $srcInfo.FileName = 'winget'
+        $srcInfo.FileName = if ($script:WinGetExePath) { $script:WinGetExePath } else { 'winget' }
         $srcInfo.Arguments = 'source list'
         $srcInfo.RedirectStandardOutput = $true
         $srcInfo.RedirectStandardError = $true
