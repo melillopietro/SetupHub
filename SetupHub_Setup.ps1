@@ -38,7 +38,7 @@ param(
 #region === BASE CONFIGURATION ===
 $ErrorActionPreference = 'Continue'
 $script:AppName = 'SetupHub'
-$script:AppVersion = '1.1'
+$script:AppVersion = '1.1.1'
 $script:LicenseName = 'GNU General Public License v3.0 only'
 $script:LicenseSpdx = 'GPL-3.0-only'
 $script:AuthorName = 'Pietro Melillo'
@@ -278,69 +278,168 @@ function Repair-AppXEnvironment {
     } catch {}
 }
 
-$script:WinGetExePath = 'winget'
-
-function Test-WinGetBinary {
-    param([string]$Path = 'winget')
+function Get-WinGetExecutablePath {
     try {
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $Path
-        $psi.Arguments = '--version'
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $true
-        $psi.UseShellExecute = $false
-        $psi.CreateNoWindow = $true
-        $p = [System.Diagnostics.Process]::Start($psi)
-        if ($p.WaitForExit(3500)) {
-            $stdout = $p.StandardOutput.ReadToEnd()
-            $stderr = $p.StandardError.ReadToEnd()
-            $combined = ($stdout + " " + $stderr).Trim()
-            if ($p.ExitCode -eq 0 -or $combined -match '\d+\.\d+' -or $combined -match 'v\d+') {
-                return $true
-            }
-        } else {
-            try { $p.Kill() } catch {}
+        $appx = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+        if ($appx -and $appx.InstallLocation) {
+            $exe = Join-Path $appx.InstallLocation 'winget.exe'
+            if (Test-Path $exe) { return $exe }
         }
     } catch {}
-    return $false
+    $localApps = "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe"
+    if (Test-Path $localApps) { return $localApps }
+    return 'winget'
+}
+
+function Invoke-WinGetCli {
+    param([string]$Arguments)
+    
+    # 1. First try: standard cmd /c winget
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "$env:ComSpec"
+    $psi.Arguments = "/d /c winget $Arguments"
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    try {
+        $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+        $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    } catch {}
+
+    $stdout = ''
+    $stderr = ''
+    $exitCode = -1
+
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $stderr = $proc.StandardError.ReadToEnd()
+        $proc.WaitForExit()
+        $exitCode = $proc.ExitCode
+    } catch {
+        $stderr = $_.Exception.Message
+    }
+
+    # If cmd /c winget produced output or completed with 0, and didn't report unrecognized command
+    $notRecognized = ($stderr -match '(?i)(not recognized|non . riconosciuto|cannot find the file|impossibile trovare)')
+    if (-not $notRecognized -and (-not [string]::IsNullOrWhiteSpace($stdout) -or $exitCode -eq 0)) {
+        return [pscustomobject]@{
+            ExitCode = $exitCode
+            StdOut = $stdout
+            StdErr = $stderr
+        }
+    }
+
+    # 2. Second try: find winget in LocalAppData or WindowsApps and invoke via cmd /c "<path>"
+    $candidatePaths = @(
+        "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe"
+    )
+    try {
+        $appx = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+        if ($appx -and $appx.InstallLocation) {
+            $candidatePaths += (Join-Path $appx.InstallLocation 'winget.exe')
+        }
+    } catch {}
+    try {
+        $userProfiles = Get-ChildItem -Path "$env:SystemDrive\Users" -Directory -ErrorAction SilentlyContinue
+        if ($userProfiles) {
+            foreach ($u in $userProfiles) {
+                $candidatePaths += "$($u.FullName)\AppData\Local\Microsoft\WindowsApps\winget.exe"
+            }
+        }
+    } catch {}
+
+    foreach ($cPath in $candidatePaths) {
+        if ($cPath -and (Test-Path $cPath)) {
+            try {
+                $psiPath = New-Object System.Diagnostics.ProcessStartInfo
+                $psiPath.FileName = "$env:ComSpec"
+                $psiPath.Arguments = "/d /c `"`"$cPath`" $Arguments`""
+                $psiPath.RedirectStandardOutput = $true
+                $psiPath.RedirectStandardError = $true
+                $psiPath.UseShellExecute = $false
+                $psiPath.CreateNoWindow = $true
+                try {
+                    $psiPath.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+                    $psiPath.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+                } catch {}
+                $pPath = [System.Diagnostics.Process]::Start($psiPath)
+                $outPath = $pPath.StandardOutput.ReadToEnd()
+                $errPath = $pPath.StandardError.ReadToEnd()
+                $pPath.WaitForExit()
+                if (-not [string]::IsNullOrWhiteSpace($outPath) -or $pPath.ExitCode -eq 0) {
+                    return [pscustomobject]@{
+                        ExitCode = $pPath.ExitCode
+                        StdOut = $outPath
+                        StdErr = $errPath
+                    }
+                }
+            } catch {}
+        }
+    }
+
+    # 3. Third try: PowerShell wrapper
+    try {
+        $psiPs = New-Object System.Diagnostics.ProcessStartInfo
+        $psiPs.FileName = 'powershell.exe'
+        $psiPs.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"& { & winget $Arguments }`""
+        $psiPs.RedirectStandardOutput = $true
+        $psiPs.RedirectStandardError = $true
+        $psiPs.UseShellExecute = $false
+        $psiPs.CreateNoWindow = $true
+        try {
+            $psiPs.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+            $psiPs.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+        } catch {}
+        $pPs = [System.Diagnostics.Process]::Start($psiPs)
+        $outPs = $pPs.StandardOutput.ReadToEnd()
+        $errPs = $pPs.StandardError.ReadToEnd()
+        $pPs.WaitForExit()
+        if (-not [string]::IsNullOrWhiteSpace($outPs) -or $pPs.ExitCode -eq 0) {
+            return [pscustomobject]@{
+                ExitCode = $pPs.ExitCode
+                StdOut = $outPs
+                StdErr = $errPs
+            }
+        }
+    } catch {}
+
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        StdOut = $stdout
+        StdErr = $stderr
+    }
 }
 
 function Resolve-WinGetEnvironment {
-    # 1. Inietta nel PATH le cartelle di installazione di WindowsAppRuntime e VCLibs
+    # 1. Inietta nel PATH le cartelle di installazione di WindowsAppRuntime e VCLibs per garantire il caricamento delle DLL a runtime
     try {
-        $wasdkList = Get-AppxPackage -Name '*WindowsAppRuntime*' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending
-        foreach ($w in $wasdkList) {
-            if ($w.InstallLocation -and -not $env:PATH.Contains($w.InstallLocation)) {
-                $env:PATH = "$($w.InstallLocation);$env:PATH"
-            }
+        $wasdk = Get-AppxPackage -Name '*WindowsAppRuntime*' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+        if ($wasdk -and $wasdk.InstallLocation) {
+            if (-not $env:PATH.Contains($wasdk.InstallLocation)) { $env:PATH = "$($wasdk.InstallLocation);$env:PATH" }
         }
-        $vclibsList = Get-AppxPackage -Name '*VCLibs*' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending
-        foreach ($v in $vclibsList) {
-            if ($v.InstallLocation -and -not $env:PATH.Contains($v.InstallLocation)) {
-                $env:PATH = "$($v.InstallLocation);$env:PATH"
-            }
+        $vclibs = Get-AppxPackage -Name '*VCLibs*' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+        if ($vclibs -and $vclibs.InstallLocation) {
+            if (-not $env:PATH.Contains($vclibs.InstallLocation)) { $env:PATH = "$($vclibs.InstallLocation);$env:PATH" }
         }
     } catch {}
 
-    # 2. Test standard PATH
-    if (Test-WinGetBinary -Path 'winget') {
-        $script:WinGetExePath = 'winget'
-        return $true
-    }
+    # 2. Check if winget is already working in current PATH or via invoker
+    try {
+        $res = Invoke-WinGetCli -Arguments '--version'
+        if ($res.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($res.StdOut)) { return $true }
+    } catch {}
 
     # 3. Check Appx package installation path for AllUsers (official, permission-safe API)
     try {
-        $appxList = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending
-        foreach ($appx in $appxList) {
-            if ($appx -and $appx.InstallLocation) {
-                $candidate = Join-Path $appx.InstallLocation 'winget.exe'
-                if (Test-Path $candidate) {
-                    if (-not $env:PATH.Contains($appx.InstallLocation)) { $env:PATH = "$($appx.InstallLocation);$env:PATH" }
-                    if (Test-WinGetBinary -Path $candidate) {
-                        $script:WinGetExePath = $candidate
-                        return $true
-                    }
-                }
+        $appx = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+        if ($appx -and $appx.InstallLocation) {
+            $wingetExe = Join-Path $appx.InstallLocation 'winget.exe'
+            if (Test-Path $wingetExe) {
+                if (-not $env:PATH.Contains($appx.InstallLocation)) { $env:PATH = "$($appx.InstallLocation);$env:PATH" }
+                $res = Invoke-WinGetCli -Arguments '--version'
+                if ($res.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($res.StdOut)) { return $true }
             }
         }
     } catch {}
@@ -348,43 +447,24 @@ function Resolve-WinGetEnvironment {
     # 4. Check LOCALAPPDATA WindowsApps
     try {
         $localApps = "$env:LOCALAPPDATA\Microsoft\WindowsApps"
-        $candidate = Join-Path $localApps 'winget.exe'
-        if (Test-Path $candidate) {
+        if (Test-Path "$localApps\winget.exe") {
             if (-not $env:PATH.Contains($localApps)) { $env:PATH = "$localApps;$env:PATH" }
-            if (Test-WinGetBinary -Path $candidate) {
-                $script:WinGetExePath = $candidate
-                return $true
-            }
+            $res = Invoke-WinGetCli -Arguments '--version'
+            if ($res.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($res.StdOut)) { return $true }
         }
     } catch {}
 
-    # 5. Check all user profile WindowsApps directories
+    # 5. Check all user profile WindowsApps directories (useful when elevated as different admin)
     try {
         $userProfiles = Get-ChildItem -Path "$env:SystemDrive\Users" -Directory -ErrorAction SilentlyContinue
         if ($userProfiles) {
             foreach ($u in $userProfiles) {
                 $userWinApps = "$($u.FullName)\AppData\Local\Microsoft\WindowsApps"
-                $candidate = Join-Path $userWinApps 'winget.exe'
-                if (Test-Path $candidate) {
+                if (Test-Path "$userWinApps\winget.exe") {
                     if (-not $env:PATH.Contains($userWinApps)) { $env:PATH = "$userWinApps;$env:PATH" }
-                    if (Test-WinGetBinary -Path $candidate) {
-                        $script:WinGetExePath = $candidate
-                        return $true
-                    }
+                    $res = Invoke-WinGetCli -Arguments '--version'
+                    if ($res.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($res.StdOut)) { return $true }
                 }
-            }
-        }
-    } catch {}
-
-    # 6. Fallback: Se winget.exe esiste fisicamente in WindowsApps, consideralo disponibile
-    try {
-        $appx = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
-        if ($appx -and $appx.InstallLocation) {
-            $candidate = Join-Path $appx.InstallLocation 'winget.exe'
-            if (Test-Path $candidate) {
-                $script:WinGetExePath = $candidate
-                if (-not $env:PATH.Contains($appx.InstallLocation)) { $env:PATH = "$($appx.InstallLocation);$env:PATH" }
-                return $true
             }
         }
     } catch {}
@@ -414,6 +494,12 @@ function New-DeploymentRestorePoint {
     param([string]$Description = 'SetupHub Pre-Deployment')
     try {
         Enable-ComputerRestore -Drive "$env:SystemDrive" -ErrorAction SilentlyContinue
+        try {
+            $srPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
+            if (Test-Path $srPath) {
+                Set-ItemProperty -Path $srPath -Name 'SystemRestorePointCreationFrequency' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+        } catch {}
         Checkpoint-Computer -Description $Description -RestorePointType 'APPLICATION_INSTALL' -ErrorAction Stop | Out-Null
         return [pscustomobject]@{ Success = $true; Message = 'OK' }
     } catch {
@@ -449,7 +535,7 @@ $installPackages = @(
     @{ Name = 'Slack'; Id = 'SlackTechnologies.Slack'; Category = 'Communication'; Checked = $false; Profiles = @('Business','Developer') }
     @{ Name = 'WhatsApp'; Id = '9NKSQGP7F2NH'; Source = 'msstore'; Category = 'Communication'; Checked = $true; Profiles = @('Essential','Business','Home'); SkipSilent = $true; Notes = 'Microsoft Store package ID for WhatsApp Desktop. Requires Microsoft Store source to be available.' }
     @{ Name = 'Telegram Desktop'; Id = 'Telegram.TelegramDesktop'; Category = 'Communication'; Checked = $true; Profiles = @('Essential','Cybersecurity','Home') }
-    @{ Name = 'Discord'; Id = 'Discord.Discord'; Category = 'Gaming','Home' }
+    @{ Name = 'Discord'; Id = 'Discord.Discord'; Category = 'Gaming'; Checked = $false; Profiles = @('Gaming','Home') }
 
     # Office / Productivity
     @{ Name = 'Microsoft 365 Apps / Office'; Id = 'Microsoft.Office'; Category = 'Office'; Checked = $false; Profiles = @('Business'); SkipSilent = $true }
@@ -639,17 +725,38 @@ function Install-WinGetBootstrap {
         $progressPreference = 'SilentlyContinue'
         Repair-AppXEnvironment
         
-        # 1. Microsoft VCLibs
-        Update-Splash -Status "Configurazione componenti di base (1/4)" -Detail "Verifica Microsoft VCLibs..."
-        $existingVcLibs = Get-AppxPackage -Name '*VCLibs*' -ErrorAction SilentlyContinue
-        if (-not $existingVcLibs) {
-            $vcLibsPath = "$env:TEMP\Microsoft.VCLibs.x64.14.00.Desktop.appx"
+        # 1. Scarica e installa pacchetto ufficiale completo dipendenze WinGet (VCLibs 140.00 / UWPDesktop e WindowsAppRuntime)
+        Update-Splash -Status "Configurazione componenti di base (1/4)" -Detail "Download dipendenze ufficiali Microsoft (VCLibs & WindowsAppRuntime)..."
+        $dependencies = @()
+        try {
+            $latestRelease = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -UseBasicParsing -TimeoutSec 15
+            $depsAsset = $latestRelease.assets | Where-Object { $_.name -match 'Dependencies\.zip$' } | Select-Object -First 1
+            if ($depsAsset) {
+                $depsZip = "$env:TEMP\DesktopAppInstaller_Dependencies.zip"
+                $depsExtract = "$env:TEMP\winget_deps"
+                Invoke-WebRequest -Uri $depsAsset.browser_download_url -OutFile $depsZip -UseBasicParsing -TimeoutSec 45
+                if (Test-Path $depsZip) {
+                    if (Test-Path $depsExtract) { Remove-Item -Path $depsExtract -Recurse -Force -ErrorAction SilentlyContinue }
+                    Expand-Archive -Path $depsZip -DestinationPath $depsExtract -Force -ErrorAction SilentlyContinue
+                    $x64Deps = Get-ChildItem -Path $depsExtract -Recurse -Filter '*.appx' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'x64' -or $_.FullName -match 'neutral' }
+                    foreach ($dep in $x64Deps) {
+                        try { Add-AppxPackage -Path $dep.FullName -ErrorAction SilentlyContinue } catch {}
+                        $dependencies += $dep.FullName
+                    }
+                }
+            }
+        } catch {}
+
+        # Fallback VCLibs standalone
+        $vcLibsPath = "$env:TEMP\Microsoft.VCLibs.x64.14.00.Desktop.appx"
+        if (-not (Test-Path $vcLibsPath)) {
             try {
-                Invoke-WebRequest -Uri 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx' -OutFile $vcLibsPath -UseBasicParsing -TimeoutSec 20
+                Invoke-WebRequest -Uri 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx' -OutFile $vcLibsPath -UseBasicParsing -TimeoutSec 15
                 Add-AppxPackage -Path $vcLibsPath -ErrorAction SilentlyContinue
             } catch {}
         }
-        Update-Splash -Status "Configurazione componenti di base (1/4)" -Detail "Microsoft VCLibs pronto."
+        if (Test-Path $vcLibsPath -and -not ($dependencies -contains $vcLibsPath)) { $dependencies += $vcLibsPath }
+        Update-Splash -Status "Configurazione componenti di base (1/4)" -Detail "Componenti di base pronti."
 
         # 2. Microsoft Windows App SDK / Windows App Runtime 1.8+ (risolve l'errore 0x80073CF3 di DesktopAppInstaller)
         Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Verifica Windows App Runtime..."
@@ -697,30 +804,46 @@ function Install-WinGetBootstrap {
                     $licensePath = "$env:TEMP\WinGet_License.xml"
                     Invoke-WebRequest -Uri $licenseAsset.browser_download_url -OutFile $licensePath -UseBasicParsing -TimeoutSec 15
                     try {
-                        Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -ErrorAction Stop | Out-Null
+                        if ($dependencies.Count -gt 0) {
+                            Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -DependencyPackagePath $dependencies -ErrorAction Stop | Out-Null
+                        } else {
+                            Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -ErrorAction Stop | Out-Null
+                        }
                     } catch {
                         Repair-AppXEnvironment
-                        Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -ErrorAction SilentlyContinue | Out-Null
+                        if ($dependencies.Count -gt 0) {
+                            Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -DependencyPackagePath $dependencies -ErrorAction SilentlyContinue | Out-Null
+                        } else {
+                            Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -ErrorAction SilentlyContinue | Out-Null
+                        }
                     }
                 }
                 Update-Splash -Status "Registrazione WinGet nel sistema (3/4)" -Detail "Installazione del pacchetto DesktopAppInstaller..."
                 try {
-                    Add-AppxPackage -Path $msixPath -ForceApplicationShutdown -ErrorAction Stop
+                    if ($dependencies.Count -gt 0) {
+                        Add-AppxPackage -Path $msixPath -DependencyPath $dependencies -ForceApplicationShutdown -ErrorAction Stop
+                    } else {
+                        Add-AppxPackage -Path $msixPath -ForceApplicationShutdown -ErrorAction Stop
+                    }
                 } catch {
                     Repair-AppXEnvironment
                     Start-Sleep -Seconds 1
-                    Add-AppxPackage -Path $msixPath -ForceApplicationShutdown -ErrorAction SilentlyContinue
+                    if ($dependencies.Count -gt 0) {
+                        Add-AppxPackage -Path $msixPath -DependencyPath $dependencies -ForceApplicationShutdown -ErrorAction SilentlyContinue
+                    } else {
+                        Add-AppxPackage -Path $msixPath -ForceApplicationShutdown -ErrorAction SilentlyContinue
+                    }
                 }
             }
         } catch {}
         
         # 4. Aggiorna PATH e reimposta sorgenti WinGet
         Update-Splash -Status "Finalizzazione ambiente (4/4)" -Detail "Aggiornamento variabili d'ambiente e sorgenti..."
-        $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('PATH','User')
+        $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('PATH','User') + ";$env:LOCALAPPDATA\Microsoft\WindowsApps"
         [void](Resolve-WinGetEnvironment)
         Start-Sleep -Seconds 1
         try {
-            & winget source reset --force 2>$null | Out-Null
+            [void](Invoke-WinGetCli -Arguments 'source reset --force')
         } catch {}
     } catch {
         $script:WinGetWarningMsg = $_.Exception.Message
@@ -812,6 +935,186 @@ $deploymentScript = {
         return "ExitCode=$ExitCode without textual output"
     }
 
+    function Repair-AppXEnvironment {
+        try {
+            $requiredDirs = @(
+                "$env:SystemRoot\AppReadiness",
+                "$env:SystemRoot\AUInstallAgent",
+                "$env:LOCALAPPDATA\Microsoft\WindowsApps"
+            )
+            foreach ($d in $requiredDirs) {
+                if (-not (Test-Path $d)) {
+                    try { New-Item -Path $d -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+                }
+            }
+            $services = @('AppReadiness', 'AppXSvc', 'ClipSVC', 'InstallService', 'wuauserv')
+            foreach ($s in $services) {
+                try {
+                    $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
+                    if ($svc) {
+                        if ($svc.StartType -eq 'Disabled') {
+                            Set-Service -Name $s -StartupType Manual -ErrorAction SilentlyContinue
+                        }
+                        if ($svc.Status -ne 'Running') {
+                            Start-Service -Name $s -ErrorAction SilentlyContinue
+                        }
+                    }
+                } catch {}
+            }
+        } catch {}
+    }
+
+    function Get-WinGetExecutablePath {
+        try {
+            $appx = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+            if ($appx -and $appx.InstallLocation) {
+                $exe = Join-Path $appx.InstallLocation 'winget.exe'
+                if (Test-Path $exe) { return $exe }
+            }
+        } catch {}
+        $localApps = "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe"
+        if (Test-Path $localApps) { return $localApps }
+        return 'winget'
+    }
+
+    function Invoke-WinGetCli {
+        param([string]$Arguments)
+        
+        # 1. First try: standard cmd /c winget
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "$env:ComSpec"
+        $psi.Arguments = "/d /c winget $Arguments"
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        try {
+            $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+            $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+        } catch {}
+
+        $stdout = ''
+        $stderr = ''
+        $exitCode = -1
+
+        try {
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $stdout = $proc.StandardOutput.ReadToEnd()
+            $stderr = $proc.StandardError.ReadToEnd()
+            $proc.WaitForExit()
+            $exitCode = $proc.ExitCode
+        } catch {
+            $stderr = $_.Exception.Message
+        }
+
+        # If cmd /c winget produced output or completed with 0, and didn't report unrecognized command
+        $notRecognized = ($stderr -match '(?i)(not recognized|non . riconosciuto|cannot find the file|impossibile trovare)')
+        if (-not $notRecognized -and (-not [string]::IsNullOrWhiteSpace($stdout) -or $exitCode -eq 0)) {
+            return [pscustomobject]@{
+                ExitCode = $exitCode
+                StdOut = $stdout
+                StdErr = $stderr
+            }
+        }
+
+        # 2. Second try: find winget in LocalAppData or WindowsApps and invoke via cmd /c "<path>"
+        $candidatePaths = @(
+            "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe"
+        )
+        try {
+            $appx = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+            if ($appx -and $appx.InstallLocation) {
+                $candidatePaths += (Join-Path $appx.InstallLocation 'winget.exe')
+            }
+        } catch {}
+        try {
+            $userProfiles = Get-ChildItem -Path "$env:SystemDrive\Users" -Directory -ErrorAction SilentlyContinue
+            if ($userProfiles) {
+                foreach ($u in $userProfiles) {
+                    $candidatePaths += "$($u.FullName)\AppData\Local\Microsoft\WindowsApps\winget.exe"
+                }
+            }
+        } catch {}
+
+        foreach ($cPath in $candidatePaths) {
+            if ($cPath -and (Test-Path $cPath)) {
+                try {
+                    $psiPath = New-Object System.Diagnostics.ProcessStartInfo
+                    $psiPath.FileName = "$env:ComSpec"
+                    $psiPath.Arguments = "/d /c `"`"$cPath`" $Arguments`""
+                    $psiPath.RedirectStandardOutput = $true
+                    $psiPath.RedirectStandardError = $true
+                    $psiPath.UseShellExecute = $false
+                    $psiPath.CreateNoWindow = $true
+                    try {
+                        $psiPath.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+                        $psiPath.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+                    } catch {}
+                    $pPath = [System.Diagnostics.Process]::Start($psiPath)
+                    $outPath = $pPath.StandardOutput.ReadToEnd()
+                    $errPath = $pPath.StandardError.ReadToEnd()
+                    $pPath.WaitForExit()
+                    if (-not [string]::IsNullOrWhiteSpace($outPath) -or $pPath.ExitCode -eq 0) {
+                        return [pscustomobject]@{
+                            ExitCode = $pPath.ExitCode
+                            StdOut = $outPath
+                            StdErr = $errPath
+                        }
+                    }
+                } catch {}
+            }
+        }
+
+        # 3. Third try: PowerShell wrapper
+        try {
+            $psiPs = New-Object System.Diagnostics.ProcessStartInfo
+            $psiPs.FileName = 'powershell.exe'
+            $psiPs.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"& { & winget $Arguments }`""
+            $psiPs.RedirectStandardOutput = $true
+            $psiPs.RedirectStandardError = $true
+            $psiPs.UseShellExecute = $false
+            $psiPs.CreateNoWindow = $true
+            try {
+                $psiPs.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+                $psiPs.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+            } catch {}
+            $pPs = [System.Diagnostics.Process]::Start($psiPs)
+            $outPs = $pPs.StandardOutput.ReadToEnd()
+            $errPs = $pPs.StandardError.ReadToEnd()
+            $pPs.WaitForExit()
+            if (-not [string]::IsNullOrWhiteSpace($outPs) -or $pPs.ExitCode -eq 0) {
+                return [pscustomobject]@{
+                    ExitCode = $pPs.ExitCode
+                    StdOut = $outPs
+                    StdErr = $errPs
+                }
+            }
+        } catch {}
+
+        return [pscustomobject]@{
+            ExitCode = $exitCode
+            StdOut = $stdout
+            StdErr = $stderr
+        }
+    }
+
+    function New-DeploymentRestorePoint {
+        param([string]$Description = 'SetupHub Pre-Deployment')
+        try {
+            Enable-ComputerRestore -Drive "$env:SystemDrive" -ErrorAction SilentlyContinue
+            try {
+                $srPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
+                if (Test-Path $srPath) {
+                    Set-ItemProperty -Path $srPath -Name 'SystemRestorePointCreationFrequency' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                }
+            } catch {}
+            Checkpoint-Computer -Description $Description -RestorePointType 'APPLICATION_INSTALL' -ErrorAction Stop | Out-Null
+            return [pscustomobject]@{ Success = $true; Message = 'OK' }
+        } catch {
+            return [pscustomobject]@{ Success = $false; Message = $_.Exception.Message }
+        }
+    }
+
     function Invoke-WinGetProcess {
         param(
             [string]$Action,
@@ -836,21 +1139,14 @@ $deploymentScript = {
         }
         if ($Action -eq 'install' -and -not $SkipSilent) { $argsList += ' --silent' }
 
-        $procInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $procInfo.FileName = if ($script:WinGetExePath) { $script:WinGetExePath } else { 'winget' }
-        $procInfo.Arguments = $argsList
-        $procInfo.RedirectStandardOutput = $true
-        $procInfo.RedirectStandardError = $true
-        try { $procInfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8; $procInfo.StandardErrorEncoding = [System.Text.Encoding]::UTF8 } catch {}
-        $procInfo.UseShellExecute = $false
-        $procInfo.CreateNoWindow = $true
-        $proc = [System.Diagnostics.Process]::Start($procInfo)
-        $stdout = $proc.StandardOutput.ReadToEnd()
-        $stderr = $proc.StandardError.ReadToEnd()
-        $proc.WaitForExit()
-        $message = Get-MeaningfulMessage -StdOut $stdout -StdErr $stderr -ExitCode $proc.ExitCode
+        $cliResult = Invoke-WinGetCli -Arguments $argsList
+        $stdout = $cliResult.StdOut
+        $stderr = $cliResult.StdErr
+        $exitCode = $cliResult.ExitCode
+        $message = Get-MeaningfulMessage -StdOut $stdout -StdErr $stderr -ExitCode $exitCode
+
         return [pscustomobject]@{
-            ExitCode = $proc.ExitCode
+            ExitCode = $exitCode
             StdOut = $stdout
             StdErr = $stderr
             Output = (($stdout + "`n" + $stderr).Trim())
@@ -867,20 +1163,27 @@ $deploymentScript = {
 
     function Invoke-ProcessCapture {
         param([string]$FileName,[string]$Arguments)
-        $targetFile = if ($FileName -eq 'winget' -and $script:WinGetExePath) { $script:WinGetExePath } else { $FileName }
+        if ($FileName -eq 'winget' -or $FileName -eq 'winget.exe') {
+            $cli = Invoke-WinGetCli -Arguments $Arguments
+            return [pscustomobject]@{ ExitCode=$cli.ExitCode; StdOut=$cli.StdOut; StdErr=$cli.StdErr; Args=$Arguments }
+        }
         $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $targetFile
+        $psi.FileName = $FileName
         $psi.Arguments = $Arguments
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         try { $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8; $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8 } catch {}
         $psi.UseShellExecute = $false
         $psi.CreateNoWindow = $true
-        $p = [System.Diagnostics.Process]::Start($psi)
-        $stdout = $p.StandardOutput.ReadToEnd()
-        $stderr = $p.StandardError.ReadToEnd()
-        $p.WaitForExit()
-        return [pscustomobject]@{ ExitCode=$p.ExitCode; StdOut=$stdout; StdErr=$stderr; Args=$Arguments }
+        try {
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $stdout = $p.StandardOutput.ReadToEnd()
+            $stderr = $p.StandardError.ReadToEnd()
+            $p.WaitForExit()
+            return [pscustomobject]@{ ExitCode=$p.ExitCode; StdOut=$stdout; StdErr=$stderr; Args=$Arguments }
+        } catch {
+            return [pscustomobject]@{ ExitCode=-1; StdOut=''; StdErr=$_.Exception.Message; Args=$Arguments }
+        }
     }
 
     function Test-WinGetCatalogPackage {
@@ -1007,20 +1310,9 @@ $deploymentScript = {
     Write-LogLine "  $(TT 'SourceCheck')"
     Write-LogLine '========================================='
     try {
-        $srcInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $srcInfo.FileName = if ($script:WinGetExePath) { $script:WinGetExePath } else { 'winget' }
-        $srcInfo.Arguments = 'source list'
-        $srcInfo.RedirectStandardOutput = $true
-        $srcInfo.RedirectStandardError = $true
-        try { $srcInfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8; $srcInfo.StandardErrorEncoding = [System.Text.Encoding]::UTF8 } catch {}
-        $srcInfo.UseShellExecute = $false
-        $srcInfo.CreateNoWindow = $true
-        $srcProc = [System.Diagnostics.Process]::Start($srcInfo)
-        $srcOut = $srcProc.StandardOutput.ReadToEnd()
-        $srcErr = $srcProc.StandardError.ReadToEnd()
-        $srcProc.WaitForExit()
-        if ($srcOut) { $srcOut -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 } | ForEach-Object { Write-LogLine "    $_" } }
-        if ($srcErr) { Write-LogLine "    STDERR: $srcErr" }
+        $srcRes = Invoke-WinGetCli -Arguments 'source list'
+        if ($srcRes.StdOut) { $srcRes.StdOut -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 } | ForEach-Object { Write-LogLine "    $_" } }
+        if ($srcRes.StdErr) { Write-LogLine "    STDERR: $($srcRes.StdErr)" }
     } catch { Write-LogLine "[$(TT 'Error')] Source check: $($_.Exception.Message)" }
     Write-LogLine ''
 
@@ -1219,10 +1511,10 @@ $deploymentScript = {
         if ($manualUnsupportedPackages -and @($manualUnsupportedPackages).Count -gt 0) { @($manualUnsupportedPackages) | ConvertTo-Json -Depth 5 | Set-Content -Path $manualJsonPath -Encoding UTF8; @($manualUnsupportedPackages) | Export-Csv -Path $manualCsvPath -NoTypeInformation -Encoding UTF8 }
         $summary = [pscustomobject]@{
             Tool = "$appName v$appVersion"
-            Author = $script:AuthorName
-            AuthorEmail = $script:AuthorEmail
-            AuthorWebsite = $script:AuthorWebsite
-            License = "$script:LicenseName ($script:LicenseSpdx)"
+            Author = $(if ($authorName) { $authorName } elseif ($script:AuthorName) { $script:AuthorName } else { 'Pietro Melillo' })
+            AuthorEmail = $(if ($authorEmail) { $authorEmail } elseif ($script:AuthorEmail) { $script:AuthorEmail } else { 'melillopietro@gmail.com' })
+            AuthorWebsite = $(if ($authorWebsite) { $authorWebsite } elseif ($script:AuthorWebsite) { $script:AuthorWebsite } else { 'https://melillopietro.github.io/' })
+            License = "$(if ($licenseName) { $licenseName } elseif ($script:LicenseName) { $script:LicenseName } else { 'GNU General Public License v3.0 only' }) ($(if ($licenseSpdx) { $licenseSpdx } elseif ($script:LicenseSpdx) { $script:LicenseSpdx } else { 'GPL-3.0-only' }))"
             ComputerName = $env:COMPUTERNAME
             User = $env:USERNAME
             OS = (Get-CimInstance Win32_OperatingSystem).Caption
@@ -1236,7 +1528,7 @@ $deploymentScript = {
             SkippedRemovals = $skippedBloat
             FailedRemovals = $failedBloat
             CatalogAvailable = @($catalogResults | Where-Object Status -eq 'Available').Count
-            CatalogNotAvailable = @($catalogResults | Where-Object Status -eq 'NotAvailable').Count
+            CatalogNotAvailable = @($catalogResults | Where-Object Status -ne 'Available').Count
             InventoryIncluded = [bool]($includeInventory -and $systemInventory)
             ManualUnsupportedPackages = @($manualUnsupportedPackages).Count
             ReportFolder = $reportFolder
@@ -1244,18 +1536,20 @@ $deploymentScript = {
         }
         $licenseInfo = [pscustomobject]@{
             Product = "$appName v$appVersion"
-            Author = $script:AuthorName
-            Email = $script:AuthorEmail
-            Website = $script:AuthorWebsite
-            Copyright = $script:CopyrightNotice
-            License = "$script:LicenseName ($script:LicenseSpdx)"
+            Author = $(if ($authorName) { $authorName } elseif ($script:AuthorName) { $script:AuthorName } else { 'Pietro Melillo' })
+            Email = $(if ($authorEmail) { $authorEmail } elseif ($script:AuthorEmail) { $script:AuthorEmail } else { 'melillopietro@gmail.com' })
+            Website = $(if ($authorWebsite) { $authorWebsite } elseif ($script:AuthorWebsite) { $script:AuthorWebsite } else { 'https://melillopietro.github.io/' })
+            Copyright = $(if ($copyrightNotice) { $copyrightNotice } elseif ($script:CopyrightNotice) { $script:CopyrightNotice } else { 'Copyright (C) 2026 Pietro Melillo' })
+            License = "$(if ($licenseName) { $licenseName } elseif ($script:LicenseName) { $script:LicenseName } else { 'GNU General Public License v3.0 only' }) ($(if ($licenseSpdx) { $licenseSpdx } elseif ($script:LicenseSpdx) { $script:LicenseSpdx } else { 'GPL-3.0-only' }))"
             CopyleftNotice = 'Modified versions may be distributed only under the same GPL-3.0-only license, preserving copyright/license notices, stating changes, and providing source code for the distributed version.'
         }
         $changelogIt = @(
+            [pscustomobject]@{ Version='1.1.1'; Language='IT'; Changes='Risolto errore di avvio WinGet Accesso negato sotto UAC con nuovo invoker shell multi-tier; download automatico dipendenze ufficiali VCLibs 140.00 >= 14.0.33519.0 e UI.Xaml 2.8; fix rimozione bloatware nel runspace.' }
             [pscustomobject]@{ Version='1.1'; Language='IT'; Changes='Risolto errore WinGet 0x80073CF3 con bootstrap automatico Windows App Runtime 1.8; aggiunta modalita CLI / Unattended (-NoGui); ricerca e filtri in tempo reale nella GUI; opzione punto di ripristino; rilevamento riavvio pendente.' }
             [pscustomobject]@{ Version='1.0'; Language='IT'; Changes='Prima release stabile: catalogo software validato; inventario hardware/software; profili personalizzati; report HTML/CSV/JSON; gestione bloatware Windows 10/11.' }
         )
         $changelogEn = @(
+            [pscustomobject]@{ Version='1.1.1'; Language='EN'; Changes='Fixed WinGet Access Denied under elevated UAC with resilient multi-tier shell invoker; automatic download of official VCLibs 140.00 >= 14.0.33519.0 and UI.Xaml 2.8 dependencies; fixed bloatware cleanup in runspace.' }
             [pscustomobject]@{ Version='1.1'; Language='EN'; Changes='Fixed WinGet error 0x80073CF3 with automatic Windows App Runtime 1.8 bootstrap; added CLI / Unattended mode (-NoGui); real-time search and category filtering in GUI; restore point option; pending reboot check.' }
             [pscustomobject]@{ Version='1.0'; Language='EN'; Changes='First stable release: validated software catalog; hardware/software inventory; custom profiles; HTML/CSV/JSON reports; Windows 10/11 bloatware handling.' }
         )
@@ -1426,6 +1720,12 @@ if ($NoGui) {
     $selectedProfile = $targetProfile
     $appName = $script:AppName
     $appVersion = $script:AppVersion
+    $authorName = $script:AuthorName
+    $authorEmail = $script:AuthorEmail
+    $authorWebsite = $script:AuthorWebsite
+    $licenseName = $script:LicenseName
+    $licenseSpdx = $script:LicenseSpdx
+    $copyrightNotice = $script:CopyrightNotice
 
     $dispatcher = $null
     $progressBar = $null
@@ -1685,15 +1985,17 @@ $script:bloatItemEntries = @()
 
 function New-PackageItem {
     param(
-        [string]$Name,
-        [string]$Id,
-        [string]$Category,
-        [bool]$IsChecked,
+        [hashtable]$Package,
         [System.Windows.Controls.Panel]$Panel,
         [ref]$CheckboxList,
         [ref]$StatusList,
         [ref]$ItemEntriesList
     )
+    $Name = [string]$Package.Name
+    $Id = [string]$Package.Id
+    $Category = $(if ($Package.ContainsKey('Category')) { [string]$Package.Category } else { '' })
+    $IsChecked = [bool]$Package.Checked
+
     $border = New-Object System.Windows.Controls.Border
     $border.Margin = [System.Windows.Thickness]::new(0,2,0,2)
     $border.Padding = [System.Windows.Thickness]::new(8,5,8,5)
@@ -1759,15 +2061,16 @@ function New-PackageItem {
             Category = $Category
             Checkbox = $checkbox
             StatusLabel = $statusLabel
+            Pkg = $Package
         }
     }
 }
 
 foreach ($pkg in $installPackages) {
-    New-PackageItem -Name $pkg.Name -Id $pkg.Id -Category $pkg.Category -IsChecked $pkg.Checked -Panel $panelInstall -CheckboxList ([ref]$script:installCheckboxes) -StatusList ([ref]$script:installStatusLabels) -ItemEntriesList ([ref]$script:installItemEntries)
+    New-PackageItem -Package $pkg -Panel $panelInstall -CheckboxList ([ref]$script:installCheckboxes) -StatusList ([ref]$script:installStatusLabels) -ItemEntriesList ([ref]$script:installItemEntries)
 }
 foreach ($pkg in $bloatwarePackages) {
-    New-PackageItem -Name $pkg.Name -Id $pkg.Id -Category 'Windows App' -IsChecked $pkg.Checked -Panel $panelBloatware -CheckboxList ([ref]$script:bloatCheckboxes) -StatusList ([ref]$script:bloatStatusLabels) -ItemEntriesList ([ref]$script:bloatItemEntries)
+    New-PackageItem -Package $pkg -Panel $panelBloatware -CheckboxList ([ref]$script:bloatCheckboxes) -StatusList ([ref]$script:bloatStatusLabels) -ItemEntriesList ([ref]$script:bloatItemEntries)
 }
 
 function Filter-InstallPackages {
@@ -1951,6 +2254,10 @@ $btnDeselectAllBloat.Add_Click({ foreach ($cb in $script:bloatCheckboxes) { $cb.
 $btnResetRecommended.Add_Click({ Apply-RecommendedDefaults })
 $btnNewProfile.Add_Click({ New-CustomProfile })
 $btnApplyProfile.Add_Click({ Apply-ProfileSelection -ProfileName ([string]$cmbProfile.SelectedItem) })
+$cmbProfile.Add_SelectionChanged({
+    $sel = [string]$cmbProfile.SelectedItem
+    if (-not [string]::IsNullOrWhiteSpace($sel)) { Apply-ProfileSelection -ProfileName $sel }
+})
 $btnSaveProfile.Add_Click({ Save-CustomProfile })
 $btnLoadProfile.Add_Click({ Load-CustomProfile })
 $btnCredits.Add_Click({
@@ -2012,28 +2319,32 @@ if ($btnRepairWinGet) {
 
 $btnStart.Add_Click({
     $selectedInstalls = @()
-    for ($i=0; $i -lt $script:installCheckboxes.Count; $i++) {
-        if ($script:installCheckboxes[$i].IsChecked) {
+    for ($i=0; $i -lt $script:installItemEntries.Count; $i++) {
+        $entry = $script:installItemEntries[$i]
+        if ($entry.Checkbox.IsChecked) {
+            $pkg = $entry.Pkg
             $selectedInstalls += @{
                 Index = $i
-                Id = [string]$script:installCheckboxes[$i].Tag
-                Name = [string]$installPackages[$i].Name
-                Category = [string]$installPackages[$i].Category
-                SkipSilent = [bool]$installPackages[$i].SkipSilent
-                Source = $(if ($installPackages[$i].ContainsKey('Source')) { [string]$installPackages[$i].Source } else { 'winget' })
-                AlternateIds = $(if ($installPackages[$i].ContainsKey('AlternateIds')) { @($installPackages[$i].AlternateIds) } else { @() })
-                Notes = $(if ($installPackages[$i].ContainsKey('Notes')) { [string]$installPackages[$i].Notes } else { '' })
+                Id = [string]$pkg.Id
+                Name = [string]$pkg.Name
+                Category = $(if ($pkg.ContainsKey('Category')) { [string]$pkg.Category } else { '' })
+                SkipSilent = $(if ($pkg.ContainsKey('SkipSilent')) { [bool]$pkg.SkipSilent } else { $false })
+                Source = $(if ($pkg.ContainsKey('Source')) { [string]$pkg.Source } else { 'winget' })
+                AlternateIds = $(if ($pkg.ContainsKey('AlternateIds')) { @($pkg.AlternateIds) } else { @() })
+                Notes = $(if ($pkg.ContainsKey('Notes')) { [string]$pkg.Notes } else { '' })
             }
         }
     }
     $selectedBloat = @()
-    for ($i=0; $i -lt $script:bloatCheckboxes.Count; $i++) {
-        if ($script:bloatCheckboxes[$i].IsChecked) {
+    for ($i=0; $i -lt $script:bloatItemEntries.Count; $i++) {
+        $entry = $script:bloatItemEntries[$i]
+        if ($entry.Checkbox.IsChecked) {
+            $pkg = $entry.Pkg
             $selectedBloat += @{
                 Index = $i
-                Id = [string]$script:bloatCheckboxes[$i].Tag
-                Name = [string]$bloatwarePackages[$i].Name
-                PackageName = $(if ($bloatwarePackages[$i].ContainsKey('PackageName')) { [string]$bloatwarePackages[$i].PackageName } else { ([string]$bloatwarePackages[$i].Id).Split('_')[0] })
+                Id = [string]$pkg.Id
+                Name = [string]$pkg.Name
+                PackageName = $(if ($pkg.ContainsKey('PackageName')) { [string]$pkg.PackageName } else { ([string]$pkg.Id).Split('_')[0] })
             }
         }
     }
@@ -2105,6 +2416,12 @@ $btnStart.Add_Click({
     $runspace.SessionStateProxy.SetVariable('selectedProfile', $selectedProfile)
     $runspace.SessionStateProxy.SetVariable('appName', $appName)
     $runspace.SessionStateProxy.SetVariable('appVersion', $appVersion)
+    $runspace.SessionStateProxy.SetVariable('authorName', $script:AuthorName)
+    $runspace.SessionStateProxy.SetVariable('authorEmail', $script:AuthorEmail)
+    $runspace.SessionStateProxy.SetVariable('authorWebsite', $script:AuthorWebsite)
+    $runspace.SessionStateProxy.SetVariable('licenseName', $script:LicenseName)
+    $runspace.SessionStateProxy.SetVariable('licenseSpdx', $script:LicenseSpdx)
+    $runspace.SessionStateProxy.SetVariable('copyrightNotice', $script:CopyrightNotice)
     $runspace.SessionStateProxy.SetVariable('textTable', $textTable)
 
     $psCmd = [powershell]::Create()

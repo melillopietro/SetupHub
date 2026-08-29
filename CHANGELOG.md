@@ -6,6 +6,13 @@ All notable changes to SetupHub are tracked in this file.
 
 ## English
 
+### v1.1.1 - WinGet Invoker & VCLibs Dependencies Fix
+
+- **Multi-tier WinGet Invoker**: Fixed `ERROR_ACCESS_DENIED` under elevated Administrator UAC tokens by wrapping execution through the Windows shell and alias broker.
+- **Official VCLibs & XAML Dependencies**: Added automatic download of `DesktopAppInstaller_Dependencies.zip` from Microsoft GitHub releases, installing `Microsoft.VCLibs.140.00` (>=14.0.33519.0) and `Microsoft.UI.Xaml.2.8` to permanently resolve `0x80073CF3`.
+- **Runspace Functions Injection**: Fixed `Repair-AppXEnvironment` and helper functions scope in WPF background runspaces, enabling bloatware cleanup.
+- **Package Binding & Discord Fix**: Fixed Discord metadata and bound UI entries directly to package hashtables.
+
 ### v1.1 - WinGet Bootstrap Fix & CLI Unattended Support
 
 - **WinGet Bootstrap Fix**: Added automatic Microsoft Windows App Runtime 1.8+ dependency installer during WinGet bootstrap, resolving AppX deployment error `0x80073CF3`.
@@ -33,6 +40,13 @@ All notable changes to SetupHub are tracked in this file.
 ---
 
 ## Italiano
+
+### v1.1.1 - Fix Invoker WinGet e Dipendenze VCLibs
+
+- **Invoker WinGet Multi-Tier**: Risolto l'errore `ERROR_ACCESS_DENIED` sotto token UAC elevato incapsulando l'esecuzione attraverso la shell di sistema e il broker degli alias.
+- **Dipendenze Ufficiali VCLibs e XAML**: Aggiunto il download automatico di `DesktopAppInstaller_Dependencies.zip` da Microsoft GitHub Releases, con installazione di `Microsoft.VCLibs.140.00` (>=14.0.33519.0) e `Microsoft.UI.Xaml.2.8` per risolvere in modo definitivo l'errore `0x80073CF3`.
+- **Iniezione Funzioni nel Runspace**: Risolto lo scope di `Repair-AppXEnvironment` e delle funzioni ausiliarie nel runspace in background WPF, abilitando la rimozione corretta del bloatware.
+- **Binding Pacchetti e Fix Discord**: Corretti i metadati di Discord e associati gli elementi dell'interfaccia direttamente alle tabelle hash dei pacchetti.
 
 ### v1.1 - Fix Bootstrap WinGet e Supporto CLI Unattended
 
