@@ -31,16 +31,21 @@ It was created for a practical IT scenario: a fresh or recently reinstalled Wind
 
 ## What SetupHub does
 
-SetupHub provides a graphical interface for preparing Windows 10 and Windows 11 workstations.
+SetupHub provides both a modern graphical interface (WPF) and a headless command-line interface (CLI) for preparing Windows 10 and Windows 11 workstations.
 
 It helps you:
 
 - install commonly used applications through WinGet and Microsoft Store sources;
+- automatically bootstrap WinGet along with modern **Windows App Runtime 1.8+** dependencies;
 - apply predefined or custom software profiles;
+- filter software and bloatware in real time with built-in search and category filters;
 - remove selected Windows preinstalled apps;
+- create an optional **Windows System Restore Point** before making system changes;
+- detect pending Windows reboots;
 - validate the software catalog before installation;
 - collect hardware and software inventory from the machine;
-- generate a final deployment report in multiple formats.
+- generate a final deployment report in multiple formats (HTML, CSV, JSON, TXT);
+- run interactively with GUI or unattended via CLI parameters for remote/automated deployment (Intune, MDM, SCCM).
 
 SetupHub does **not** bundle third-party installers. Package resolution and installation are handled by the package sources configured on the target machine. This keeps the repository small, easier to review, and more transparent from an operational point of view.
 
@@ -49,10 +54,19 @@ SetupHub does **not** bundle third-party installers. Package resolution and inst
 ## Main features
 
 - **Windows 10 and Windows 11 support**  
-  Designed for modern Windows workstations with PowerShell and WinGet available.
+  Designed for modern Windows workstations with PowerShell 5.1+ and WinGet available.
+
+- **Resilient WinGet Bootstrap**  
+  Includes automatic download and setup for `Microsoft.DesktopAppInstaller` and its prerequisite `Microsoft.WindowsAppRuntime.1.8`, preventing `0x80073CF3` dependency errors on clean systems.
+
+- **GUI and Headless CLI modes**  
+  Run interactively with the WPF GUI or pass `-NoGui` for completely unattended scriptable installations.
+
+- **Real-time Search and Category Filtering**  
+  Filter the software and bloatware lists instantly by typing package names, IDs, or choosing a category.
 
 - **Bilingual interface**  
-  The GUI supports both English and Italian.
+  The GUI and logs support both English and Italian.
 
 - **Curated software catalog**  
   Applications are grouped by category, including browsers, office tools, developer tools, cybersecurity utilities, remote support tools, multimedia applications, virtualization tools, and system utilities.
@@ -61,22 +75,22 @@ SetupHub does **not** bundle third-party installers. Package resolution and inst
   Before starting the deployment, SetupHub checks whether each supported package can actually be resolved from the configured WinGet or Microsoft Store source.
 
 - **Predefined profiles**  
-  Ready-to-use profiles are available for common workstation scenarios such as essential setup, business, developer, cybersecurity, multimedia, gaming, home, clean, and complete.
+  Ready-to-use profiles are available for common workstation scenarios: `Essential`, `Business`, `Developer`, `Cybersecurity`, `Multimedia`, `Gaming`, `Home`, `Clean`, and `Complete`.
 
 - **Custom profiles**  
-  New profiles can be created directly from the GUI and saved for later use.
+  New profiles can be created directly from the GUI and saved as JSON in `profiles/` for later use.
+
+- **System Restore Point & Pending Reboot Detection**  
+  Optionally creates a Windows Restore Point before installing/debloating and warns about pending Windows updates.
 
 - **Bloatware cleanup**  
-  SetupHub can remove selected Windows Appx and provisioned packages when present. If a package is already absent, it is recorded as skipped rather than treated as an error.
+  SetupHub removes selected Windows Appx and provisioned packages when present. If a package is already absent, it is recorded as skipped rather than treated as an error.
 
 - **Hardware and software inventory**  
   The final report includes information about the operating system, CPU, memory, disks, volumes, GPU, network adapters, TPM, Secure Boot, Microsoft Defender status, PowerShell, WinGet, and installed software.
 
 - **Deployment reporting**  
-  Each run produces HTML, CSV, JSON, and text logs.
-
-- **Manual / unsupported software tracking**  
-  Some applications are intentionally excluded from automatic installation when their WinGet package is unavailable, unstable, vendor-restricted, or better handled manually.
+  Each run produces HTML, CSV, JSON, and text logs under `reports/`.
 
 ---
 
@@ -114,8 +128,6 @@ The screenshots below show the main workflow: selecting a software profile, vali
   <img src="./assets/screenshots/setuphub-inventory.png" alt="SetupHub hardware and software inventory" width="900">
 </p>
 
-Before publishing screenshots, remove or blur private information such as serial numbers, internal hostnames, public IP addresses, private IP addresses, MAC addresses, usernames, and local report paths.
-
 ---
 
 ## Requirements
@@ -126,17 +138,17 @@ SetupHub is designed for:
 - Windows 11;
 - PowerShell 5.1 or newer;
 - administrator privileges;
-- WinGet / Windows Package Manager;
+- WinGet / Windows Package Manager (bootstrapped automatically if missing);
 - Microsoft Store source, when Store-based packages are selected;
 - internet access for package validation and download.
-
-Some packages may require additional conditions, such as a Microsoft account, Microsoft 365 license, vendor account, or an installer flow controlled by the publisher.
 
 ---
 
 ## Quick start
 
-Clone or download the repository, then start SetupHub from an elevated shell.
+### Interactive GUI Mode
+
+Clone or download the repository, then start SetupHub from an elevated shell:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\SetupHub_Setup.ps1
@@ -148,69 +160,40 @@ You can also use the launcher:
 Start_SetupHub.cmd
 ```
 
-SetupHub will request elevation if it is not already running as administrator.
+### Headless CLI / Unattended Mode
 
----
+For automated deployments (e.g. Intune, MDM, provisioning USB keys):
 
-## Recommended workflow
+```powershell
+# Deploy the Developer profile unattended with restore point
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\SetupHub_Setup.ps1 -Profile Developer -NoGui -CreateRestorePoint
 
-1. Start SetupHub as administrator.
-2. Choose the interface language.
-3. Select a predefined profile or create a new custom profile.
-4. Review the software selection.
-5. Review the bloatware cleanup section.
-6. Start the deployment.
-7. Wait for catalog validation, installation, cleanup, and inventory collection.
-8. Open the generated HTML report from the `reports` folder.
-9. Keep the report internally if needed, but do not publish it without removing sensitive host information.
+# Deploy the Business profile in English without GUI
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\SetupHub_Setup.ps1 -Profile Business -NoGui -Language en
 
----
+# Deploy custom specific packages without GUI
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\SetupHub_Setup.ps1 -NoGui -InstallIds "Google.Chrome","7zip.7zip","Git.Git"
+```
 
-## Profiles
+#### CLI Parameters
 
-Profiles are simple software selections used to prepare different workstation types faster.
-
-Typical profile scenarios include:
-
-- a basic office workstation;
-- a business workstation;
-- a developer machine;
-- a cybersecurity analysis workstation;
-- a multimedia workstation;
-- a gaming workstation;
-- a clean Windows setup with only essential tools.
-
-Custom profiles are stored in the `profiles` folder. They can be created directly from the GUI with the **New profile** button and updated with **Save profile**.
-
----
-
-## Package validation
-
-Every run includes a catalog validation phase.
-
-SetupHub checks whether each supported package can be resolved through the configured source before treating it as installable. This helps avoid false deployment failures caused by package IDs that were renamed, removed, replaced, or temporarily unavailable.
-
-Packages that cannot be resolved are not counted as failed installations. They are reported separately so the deployment report remains meaningful.
-
-This is important because WinGet package identifiers and vendor installers can change over time.
-
----
-
-## Bloatware cleanup
-
-SetupHub handles selected Windows preinstalled apps through Appx and provisioned package checks.
-
-When a selected package exists, SetupHub attempts to remove it. When it does not exist, the result is recorded as already absent instead of being treated as an error.
-
-This avoids false failures on machines that are already clean, have been customized by OEM images, or use a Windows edition where certain apps are not present.
+| Parameter | Type | Description |
+| :--- | :--- | :--- |
+| `-Profile <name>` | String | Profile to apply (`Essential`, `Business`, `Developer`, `Cybersecurity`, `Multimedia`, `Gaming`, `Home`, `Clean`, `Complete`, or custom profile name). |
+| `-NoGui` | Switch | Run directly in console without launching the WPF interface. |
+| `-CreateRestorePoint` | Switch | Creates a Windows System Restore Point prior to operations. |
+| `-Language <it\|en>` | String | Sets UI/console language (`it` or `en`). |
+| `-SkipValidation` | Switch | Skips Phase 0 catalog validation. |
+| `-NoInventory` | Switch | Skips hardware and software inventory collection. |
+| `-NoReport` | Switch | Skips generating report files in `reports/`. |
+| `-InstallIds <id1,id2>` | Array | Specific list of WinGet package IDs to install. |
+| `-BloatIds <id1,id2>` | Array | Specific list of AppX package IDs to remove. |
 
 ---
 
 ## Reports
 
-Each run creates a timestamped report set under the `reports` folder.
-
-Typical outputs include:
+Each run creates a timestamped report set under the `reports` folder:
 
 ```text
 SetupHub_Report_<timestamp>.html
@@ -227,64 +210,14 @@ SetupHub_ManualUnsupported_<timestamp>.csv
 
 The report includes:
 
-- installation results;
-- package validation status;
+- installation results and command lines;
+- package validation status and exit codes;
 - bloatware cleanup results;
-- command executed for each operation;
-- exit codes;
-- WinGet logs where available;
-- hardware inventory;
-- operating system information;
-- disks and volumes;
-- network adapters;
-- TPM and Secure Boot status;
-- Microsoft Defender status, when available;
+- WinGet logs for each package;
+- hardware inventory and system information;
+- disks, volumes, and network adapters;
+- TPM, Secure Boot, and Microsoft Defender status;
 - installed desktop software inventory.
-
-Do not commit generated reports to the repository. They may contain machine-specific data.
-
----
-
-## Manual and unsupported packages
-
-Some tools are intentionally kept out of the automatic installation catalog.
-
-This can happen when:
-
-- the package is not consistently available through WinGet;
-- the vendor requires a portal login;
-- the software is distributed as a portable archive rather than a standard installer;
-- the package depends on specific hardware;
-- the installation is better handled manually.
-
-Examples may include products such as Ghidra, VMware Workstation, or GPU-vendor tools depending on the current package ecosystem and the target machine.
-
-These applications are documented in the report but are not treated as deployment errors.
-
----
-
-## Repository layout
-
-```text
-SetupHub/
-├── SetupHub_Setup.ps1
-├── Start_SetupHub.cmd
-├── README.md
-├── LICENSE
-├── NOTICE.md
-├── CHANGELOG.md
-├── SECURITY.md
-├── CONTRIBUTING.md
-├── .gitignore
-├── assets/
-│   └── screenshots/
-├── docs/
-│   └── SCREENSHOTS.md
-├── profiles/
-└── reports/
-```
-
-The `reports` folder is ignored by Git except for placeholder files. Keep generated reports local unless you have removed sensitive data.
 
 ---
 
@@ -296,8 +229,6 @@ It asks WinGet or Microsoft Store to resolve and install packages from the targe
 
 1. the repository remains small and reviewable;
 2. package availability depends on the target machine, configured sources, vendor manifests, and network conditions.
-
-Always test the tool on a non-critical machine before using it in production or on multiple endpoints.
 
 ---
 
@@ -311,8 +242,6 @@ SPDX identifier:
 GPL-3.0-only
 ```
 
-In simple terms, you may use, study, share, and modify the code. If you distribute a modified version, the modified version must remain under the same license and the corresponding source code must remain available under GPL-3.0-only.
-
 See [`LICENSE`](./LICENSE) for the full license text.
 
 ---
@@ -324,11 +253,3 @@ Created and maintained by **Pietro Melillo**.
 - Email: `melillopietro@gmail.com`
 - Website: `https://melillopietro.github.io/`
 - LinkedIn: `https://it.linkedin.com/in/melillopietro`
-
----
-
-## Disclaimer
-
-SetupHub is provided without warranty.
-
-It changes the state of the local machine by installing software and removing selected Windows apps. Review the selected items before running it, and test it before using it in managed environments.
