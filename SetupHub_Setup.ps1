@@ -467,12 +467,46 @@ function Resolve-WinGetEnvironment {
     return $false
 }
 
+function Repair-AppXEnvironment {
+    try {
+        # 1. Ricrea le cartelle di sistema necessarie a AppX (la cui mancanza provoca l'errore 0x80073CF9)
+        $requiredDirs = @(
+            "$env:SystemRoot\AppReadiness",
+            "$env:SystemRoot\AUInstallAgent",
+            "$env:LOCALAPPDATA\Microsoft\WindowsApps"
+        )
+        foreach ($d in $requiredDirs) {
+            if (-not (Test-Path $d)) {
+                New-Item -Path $d -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+            }
+        }
+
+        # 2. Avvia e abilita i servizi di installazione e AppX essenziali
+        $services = @('AppReadiness', 'AppXSvc', 'ClipSVC', 'InstallService', 'wuauserv')
+        foreach ($s in $services) {
+            try {
+                $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
+                if ($svc) {
+                    if ($svc.StartType -eq 'Disabled') {
+                        Set-Service -Name $s -StartupType Manual -ErrorAction SilentlyContinue
+                    }
+                    if ($svc.Status -ne 'Running') {
+                        Start-Service -Name $s -ErrorAction SilentlyContinue
+                    }
+                }
+            } catch {}
+        }
+    } catch {}
+}
+
 function Test-WinGetAvailable {
+    Repair-AppXEnvironment
     return (Resolve-WinGetEnvironment)
 }
 
 function Install-WinGetBootstrap {
     param([bool]$ShowGui = $true)
+    Repair-AppXEnvironment
     $splashWindow = $null
     $lblSplashStatus = $null
     $lblSplashDetail = $null
@@ -528,6 +562,7 @@ function Install-WinGetBootstrap {
 
     try {
         $progressPreference = 'SilentlyContinue'
+        Repair-AppXEnvironment
         
         # 1. Microsoft VCLibs
         Update-Splash -Status "Configurazione componenti di base (1/4)" -Detail "Download e installazione Microsoft VCLibs..."
@@ -561,13 +596,25 @@ function Install-WinGetBootstrap {
         Update-Splash -Status "Download WinGet Package Manager (3/4)" -Detail "Scaricamento del pacchetto MSIXBundle ($($msixBundleAsset.name))..."
         Invoke-WebRequest -Uri $msixBundleAsset.browser_download_url -OutFile $msixPath -UseBasicParsing -TimeoutSec 180
 
+        Repair-AppXEnvironment
         if ($licenseAsset) {
             $licensePath = "$env:TEMP\WinGet_License.xml"
             Invoke-WebRequest -Uri $licenseAsset.browser_download_url -OutFile $licensePath -UseBasicParsing -TimeoutSec 30
-            Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -ErrorAction SilentlyContinue
+            try {
+                Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -ErrorAction Stop | Out-Null
+            } catch {
+                Repair-AppXEnvironment
+                Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -ErrorAction SilentlyContinue | Out-Null
+            }
         }
         Update-Splash -Status "Registrazione WinGet nel sistema (3/4)" -Detail "Installazione del pacchetto DesktopAppInstaller..."
-        Add-AppxPackage -Path $msixPath -ForceApplicationShutdown
+        try {
+            Add-AppxPackage -Path $msixPath -ForceApplicationShutdown -ErrorAction Stop
+        } catch {
+            Repair-AppXEnvironment
+            Start-Sleep -Seconds 1
+            Add-AppxPackage -Path $msixPath -ForceApplicationShutdown -ErrorAction SilentlyContinue
+        }
         
         # 4. Aggiorna PATH e reimposta sorgenti WinGet
         Update-Splash -Status "Finalizzazione ambiente (4/4)" -Detail "Aggiornamento variabili d'ambiente e sorgenti..."
