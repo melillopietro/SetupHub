@@ -577,45 +577,62 @@ function Install-WinGetBootstrap {
         Repair-AppXEnvironment
         
         # 1. Microsoft VCLibs
-        Update-Splash -Status "Configurazione componenti di base (1/4)" -Detail "Download e installazione Microsoft VCLibs..."
-        $vcLibsPath = "$env:TEMP\Microsoft.VCLibs.x64.14.00.Desktop.appx"
-        try {
-            Invoke-WebRequest -Uri 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx' -OutFile $vcLibsPath -UseBasicParsing -TimeoutSec 60
-            Add-AppxPackage -Path $vcLibsPath -ErrorAction SilentlyContinue
-        } catch {}
-        Update-Splash -Status "Configurazione componenti di base (1/4)" -Detail "Microsoft VCLibs installato."
+        Update-Splash -Status "Configurazione componenti di base (1/4)" -Detail "Verifica Microsoft VCLibs..."
+        $existingVcLibs = Get-AppxPackage -Name '*VCLibs*' -ErrorAction SilentlyContinue
+        if (-not $existingVcLibs) {
+            $vcLibsPath = "$env:TEMP\Microsoft.VCLibs.x64.14.00.Desktop.appx"
+            try {
+                Invoke-WebRequest -Uri 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx' -OutFile $vcLibsPath -UseBasicParsing -TimeoutSec 20
+                Add-AppxPackage -Path $vcLibsPath -ErrorAction SilentlyContinue
+            } catch {}
+        }
+        Update-Splash -Status "Configurazione componenti di base (1/4)" -Detail "Microsoft VCLibs pronto."
 
         # 2. Microsoft Windows App SDK / Windows App Runtime 1.8+ (risolve l'errore 0x80073CF3 di DesktopAppInstaller)
-        Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Download Microsoft Windows App Runtime 1.8..."
-        $wasdkInstaller = "$env:TEMP\WindowsAppRuntimeInstall-x64.exe"
-        try {
-            Invoke-WebRequest -Uri 'https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe' -OutFile $wasdkInstaller -UseBasicParsing -TimeoutSec 120
-            if (Test-Path $wasdkInstaller) {
-                Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Esecuzione installatore runtime in background..."
-                $p = Start-Process -FilePath $wasdkInstaller -ArgumentList '--quiet' -PassThru
-                while (-not $p.HasExited) {
-                    Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Installazione del runtime Microsoft in corso..."
-                    Start-Sleep -Milliseconds 500
+        Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Verifica Windows App Runtime..."
+        $existingWasdk = Get-AppxPackage -Name '*WindowsAppRuntime.1.8*' -ErrorAction SilentlyContinue
+        if ($existingWasdk) {
+            Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Windows App Runtime 1.8 già installato."
+        } else {
+            $wasdkInstaller = "$env:TEMP\WindowsAppRuntimeInstall-x64.exe"
+            try {
+                Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Download Microsoft Windows App Runtime 1.8..."
+                Invoke-WebRequest -Uri 'https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe' -OutFile $wasdkInstaller -UseBasicParsing -TimeoutSec 25
+                if (Test-Path $wasdkInstaller) {
+                    Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Esecuzione installatore runtime..."
+                    $p = Start-Process -FilePath $wasdkInstaller -ArgumentList '--quiet --force' -PassThru -ErrorAction SilentlyContinue
+                    if ($p) {
+                        $maxSeconds = 12
+                        $elapsed = 0
+                        while (-not $p.HasExited -and $elapsed -lt $maxSeconds) {
+                            Start-Sleep -Seconds 1
+                            $elapsed++
+                            Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Installazione runtime in corso ($($maxSeconds - $elapsed)s)..."
+                        }
+                        if (-not $p.HasExited) {
+                            try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
+                        }
+                    }
                 }
-            }
-        } catch {}
+            } catch {}
+        }
 
         # 3. Microsoft DesktopAppInstaller (WinGet) da GitHub Releases
-        Update-Splash -Status "Download WinGet Package Manager (3/4)" -Detail "Recupero dell'ultima release di DesktopAppInstaller da GitHub..."
+        Update-Splash -Status "Download WinGet Package Manager (3/4)" -Detail "Recupero dell'ultima release di DesktopAppInstaller..."
         try {
-            $latestRelease = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -UseBasicParsing -TimeoutSec 30
+            $latestRelease = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -UseBasicParsing -TimeoutSec 15
             $msixBundleAsset = $latestRelease.assets | Where-Object { $_.name -match '\.msixbundle$' } | Select-Object -First 1
             $licenseAsset = $latestRelease.assets | Where-Object { $_.name -match 'License.*\.xml$' } | Select-Object -First 1
             $msixPath = "$env:TEMP\Microsoft.DesktopAppInstaller.msixbundle"
             
             if ($msixBundleAsset) {
-                Update-Splash -Status "Download WinGet Package Manager (3/4)" -Detail "Scaricamento del pacchetto MSIXBundle ($($msixBundleAsset.name))..."
-                Invoke-WebRequest -Uri $msixBundleAsset.browser_download_url -OutFile $msixPath -UseBasicParsing -TimeoutSec 180
+                Update-Splash -Status "Download WinGet Package Manager (3/4)" -Detail "Scaricamento del pacchetto DesktopAppInstaller..."
+                Invoke-WebRequest -Uri $msixBundleAsset.browser_download_url -OutFile $msixPath -UseBasicParsing -TimeoutSec 60
 
                 Repair-AppXEnvironment
                 if ($licenseAsset) {
                     $licensePath = "$env:TEMP\WinGet_License.xml"
-                    Invoke-WebRequest -Uri $licenseAsset.browser_download_url -OutFile $licensePath -UseBasicParsing -TimeoutSec 30
+                    Invoke-WebRequest -Uri $licenseAsset.browser_download_url -OutFile $licensePath -UseBasicParsing -TimeoutSec 15
                     try {
                         Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -ErrorAction Stop | Out-Null
                     } catch {
