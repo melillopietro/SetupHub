@@ -279,7 +279,19 @@ function Repair-AppXEnvironment {
 }
 
 function Resolve-WinGetEnvironment {
-    # 1. Check if winget is already available in current PATH
+    # 1. Inietta nel PATH le cartelle di installazione di WindowsAppRuntime e VCLibs per garantire il caricamento delle DLL a runtime
+    try {
+        $wasdk = Get-AppxPackage -Name '*WindowsAppRuntime*' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+        if ($wasdk -and $wasdk.InstallLocation) {
+            if (-not $env:PATH.Contains($wasdk.InstallLocation)) { $env:PATH = "$($wasdk.InstallLocation);$env:PATH" }
+        }
+        $vclibs = Get-AppxPackage -Name '*VCLibs*' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+        if ($vclibs -and $vclibs.InstallLocation) {
+            if (-not $env:PATH.Contains($vclibs.InstallLocation)) { $env:PATH = "$($vclibs.InstallLocation);$env:PATH" }
+        }
+    } catch {}
+
+    # 2. Check if winget is already working in current PATH
     try {
         $cmd = Get-Command winget -ErrorAction SilentlyContinue
         if ($cmd) {
@@ -288,37 +300,37 @@ function Resolve-WinGetEnvironment {
         }
     } catch {}
 
-    # 2. Check Appx package installation path (official, permission-safe API)
+    # 3. Check Appx package installation path for AllUsers (official, permission-safe API)
     try {
-        $appx = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -ErrorAction SilentlyContinue | Select-Object -First 1
+        $appx = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -AllUsers -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
         if ($appx -and $appx.InstallLocation) {
             $wingetExe = Join-Path $appx.InstallLocation 'winget.exe'
             if (Test-Path $wingetExe) {
-                $env:PATH = "$($appx.InstallLocation);$env:PATH"
+                if (-not $env:PATH.Contains($appx.InstallLocation)) { $env:PATH = "$($appx.InstallLocation);$env:PATH" }
                 $ver = (& winget --version 2>$null)
                 if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
             }
         }
     } catch {}
 
-    # 3. Check LOCALAPPDATA WindowsApps
+    # 4. Check LOCALAPPDATA WindowsApps
     try {
         $localApps = "$env:LOCALAPPDATA\Microsoft\WindowsApps"
         if (Test-Path "$localApps\winget.exe") {
-            $env:PATH = "$localApps;$env:PATH"
+            if (-not $env:PATH.Contains($localApps)) { $env:PATH = "$localApps;$env:PATH" }
             $ver = (& winget --version 2>$null)
             if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
         }
     } catch {}
 
-    # 4. Check all user profile WindowsApps directories (useful when elevated as different admin)
+    # 5. Check all user profile WindowsApps directories (useful when elevated as different admin)
     try {
         $userProfiles = Get-ChildItem -Path "$env:SystemDrive\Users" -Directory -ErrorAction SilentlyContinue
         if ($userProfiles) {
             foreach ($u in $userProfiles) {
                 $userWinApps = "$($u.FullName)\AppData\Local\Microsoft\WindowsApps"
                 if (Test-Path "$userWinApps\winget.exe") {
-                    $env:PATH = "$userWinApps;$env:PATH"
+                    if (-not $env:PATH.Contains($userWinApps)) { $env:PATH = "$userWinApps;$env:PATH" }
                     $ver = (& winget --version 2>$null)
                     if (-not [string]::IsNullOrWhiteSpace($ver)) { return $true }
                 }
@@ -1471,7 +1483,10 @@ $xaml = @"
 
         <!-- WinGet Status Warning Banner -->
         <Border x:Name="bannerWinGetWarning" Grid.Row="2" Background="#f9e2af" Padding="10,6" Visibility="Collapsed">
-            <TextBlock x:Name="lblWinGetWarning" Text="Attenzione: WinGet non e disponibile. Le funzioni di debloating e inventario restano attive." Foreground="#11111b" FontWeight="SemiBold" FontSize="11" HorizontalAlignment="Center"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                <TextBlock x:Name="lblWinGetWarning" Text="Attenzione: WinGet non risulta pienamente configurato nel sistema. L'installazione software potrebbe fallire, ma puoi procedere con debloating e inventario." Foreground="#11111b" FontWeight="SemiBold" FontSize="11" VerticalAlignment="Center"/>
+                <Button x:Name="btnRepairWinGet" Content="Ripara WinGet" Margin="12,0,0,0" Padding="8,2" Background="#fab387" Foreground="#11111b" FontWeight="Bold" FontSize="11" Cursor="Hand" BorderThickness="0"/>
+            </StackPanel>
         </Border>
 
         <!-- Main Panels -->
@@ -1605,6 +1620,7 @@ $bannerPendingReboot = $window.FindName('bannerPendingReboot')
 $lblPendingReboot = $window.FindName('lblPendingReboot')
 $bannerWinGetWarning = $window.FindName('bannerWinGetWarning')
 $lblWinGetWarning = $window.FindName('lblWinGetWarning')
+$btnRepairWinGet = $window.FindName('btnRepairWinGet')
 #endregion
 
 #region === DYNAMIC ITEM GENERATION & FILTERING ===
@@ -1901,6 +1917,46 @@ $cmbLanguage.Add_SelectionChanged({
     }
 })
 $btnCancel.Add_Click({ $window.Close() })
+
+if ($btnRepairWinGet) {
+    $btnRepairWinGet.Add_Click({
+        $btnRepairWinGet.IsEnabled = $false
+        $lblWinGetWarning.Text = "Riparazione e registrazione componenti WinGet in corso..."
+        [System.Windows.Forms.Application]::DoEvents()
+        
+        # 1. Ripara ambiente AppX
+        Repair-AppXEnvironment
+        
+        # 2. Re-registra i manifest dei pacchetti WindowsAppRuntime e DesktopAppInstaller
+        try {
+            Get-AppxPackage -AllUsers *WindowsAppRuntime* -ErrorAction SilentlyContinue | ForEach-Object {
+                Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml" -ErrorAction SilentlyContinue
+            }
+            Get-AppxPackage -AllUsers *DesktopAppInstaller* -ErrorAction SilentlyContinue | ForEach-Object {
+                Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml" -ErrorAction SilentlyContinue
+            }
+        } catch {}
+        
+        # 3. Reimposta sorgenti WinGet
+        try {
+            & winget source reset --force 2>$null | Out-Null
+        } catch {}
+        
+        # 4. Verifica nuovamente WinGet
+        $ready = Resolve-WinGetEnvironment
+        if ($ready) {
+            $script:WinGetAvailable = $true
+            $bannerWinGetWarning.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#a6e3a1')
+            $lblWinGetWarning.Text = "WinGet ripristinato e pronto all'uso!"
+            $btnRepairWinGet.Visibility = [System.Windows.Visibility]::Collapsed
+            [System.Windows.MessageBox]::Show("WinGet e' stato configurato e agganciato correttamente!", $script:AppName, 'OK', 'Information') | Out-Null
+        } else {
+            $btnRepairWinGet.IsEnabled = $true
+            $lblWinGetWarning.Text = (T 'WinGetWarningBanner')
+            [System.Windows.MessageBox]::Show("I file di WinGet sono stati registrati, ma potrebbe essere necessario un riavvio di Windows per rendere operative le dipendenze.", $script:AppName, 'OK', 'Warning') | Out-Null
+        }
+    })
+}
 
 $btnStart.Add_Click({
     $selectedInstalls = @()
