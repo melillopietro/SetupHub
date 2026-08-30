@@ -2010,11 +2010,13 @@ $xaml = @"
                         <!-- Search and Category Filter -->
                         <Grid Margin="0,0,0,8">
                             <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
-                            <TextBox x:Name="txtSearchInstall" Grid.Column="0" Style="{StaticResource SearchBoxStyle}" Margin="0,0,6,0" ToolTip="Cerca software per nome o ID"/>
-                            <ComboBox x:Name="cmbCategoryFilter" Grid.Column="1" Style="{StaticResource ComboStyle}" MinWidth="130" Height="26" Margin="0"/>
+                            <TextBlock Grid.Column="0" Text="🔍" VerticalAlignment="Center" Margin="0,0,6,0" Foreground="#89b4fa" FontSize="13"/>
+                            <TextBox x:Name="txtSearchInstall" Grid.Column="1" Style="{StaticResource SearchBoxStyle}" Margin="0,0,6,0" ToolTip="Cerca software per nome o ID"/>
+                            <ComboBox x:Name="cmbCategoryFilter" Grid.Column="2" Style="{StaticResource ComboStyle}" MinWidth="130" Height="26" Margin="0"/>
                         </Grid>
                     </StackPanel>
                     <ScrollViewer VerticalScrollBarVisibility="Auto">
@@ -2033,7 +2035,14 @@ $xaml = @"
                             <Button x:Name="btnDeselectAllBloat" Content="Deseleziona tutto" Style="{StaticResource ActionButton}" FontSize="11"/>
                         </WrapPanel>
                         <!-- Search Bloatware -->
-                        <TextBox x:Name="txtSearchBloat" Style="{StaticResource SearchBoxStyle}" Margin="0,0,0,8" ToolTip="Cerca bloatware"/>
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="🔍" VerticalAlignment="Center" Margin="0,0,6,0" Foreground="#f38ba8" FontSize="13"/>
+                            <TextBox x:Name="txtSearchBloat" Grid.Column="1" Style="{StaticResource SearchBoxStyle}" ToolTip="Cerca bloatware"/>
+                        </Grid>
                     </StackPanel>
                     <ScrollViewer VerticalScrollBarVisibility="Auto">
                         <StackPanel x:Name="panelBloatware"/>
@@ -2278,6 +2287,9 @@ function Set-UILanguage {
     $lblFooter.Text = T 'Footer'
     $lblPendingReboot.Text = T 'PendingRebootBanner'
     $lblWinGetWarning.Text = T 'WinGetWarningBanner'
+    $txtSearchInstall.ToolTip = T 'SearchInstallPlaceholder'
+    $txtSearchBloat.ToolTip = T 'SearchBloatPlaceholder'
+    if ($btnRepairWinGet) { $btnRepairWinGet.Content = if ($script:Lang -eq 'it') { 'Ripara WinGet' } else { 'Repair WinGet' } }
     Populate-CategoryFilter
 }
 
@@ -2375,6 +2387,11 @@ foreach ($profileFile in Get-ChildItem -Path $script:ProfileFolder -Filter '*.js
         $p = Get-Content -Path $profileFile.FullName -Raw | ConvertFrom-Json
         Add-ProfileToCombo -Name ([string]$p.Name)
     } catch {}
+}
+if ($script:Lang -eq 'en') {
+    $cmbLanguage.SelectedIndex = 1
+} else {
+    $cmbLanguage.SelectedIndex = 0
 }
 Set-UILanguage
 

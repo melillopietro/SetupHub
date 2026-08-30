@@ -56,17 +56,23 @@ SetupHub does **not** bundle third-party installers. Package resolution and inst
 - **Windows 10 and Windows 11 support**  
   Designed for modern Windows workstations with PowerShell 5.1+ and WinGet available.
 
-- **Resilient WinGet Bootstrap**  
-  Includes automatic download and setup for `Microsoft.DesktopAppInstaller` and its prerequisite `Microsoft.WindowsAppRuntime.1.8`, preventing `0x80073CF3` dependency errors on clean systems.
+- **Parallel High-Speed Validation (v1.2.0)**  
+  Validates software packages concurrently with a multi-threaded `RunspacePool` (up to 10 workers), cutting validation time by ~80% (from ~50s down to ~5-8s).
+
+- **Asynchronous Background Inventory**  
+  Collects hardware, software, and security posture in background threads concurrently with catalog checks, eliminating wait time during report generation.
+
+- **Resilient WinGet Bootstrap & Multi-Tier Invoker**  
+  Includes automatic download of `DesktopAppInstaller_Dependencies.zip` (official `Microsoft.VCLibs.140.00` and `Microsoft.UI.Xaml.2.8`) and `Microsoft.WindowsAppRuntime.1.8`, preventing `0x80073CF3` and UAC access denied errors.
 
 - **GUI and Headless CLI modes**  
   Run interactively with the WPF GUI or pass `-NoGui` for completely unattended scriptable installations.
 
-- **Real-time Search and Category Filtering**  
-  Filter the software and bloatware lists instantly by typing package names, IDs, or choosing a category.
+- **Real-time Search Bar and Category Filtering**  
+  Filter the software catalog instantly by typing package names, IDs, or categories in the prominent search bar, with a dedicated search bar for bloatware.
 
-- **Bilingual interface**  
-  The GUI and logs support both English and Italian.
+- **Complete Bilingual Interface (English / Italiano)**  
+  Instant runtime language switching in the GUI (English and Italian) and CLI support via `-Language <en|it>`. All logs, dialogs, and reports reflect the selected language.
 
 - **Curated software catalog**  
   Applications are grouped by category, including browsers, office tools, developer tools, cybersecurity utilities, remote support tools, multimedia applications, virtualization tools, and system utilities.
