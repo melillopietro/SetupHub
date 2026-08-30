@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-only
+﻿# SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2026 Pietro Melillo
 <#
 .SYNOPSIS
@@ -2014,7 +2014,7 @@ $xaml = @"
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" Text="🔍" VerticalAlignment="Center" Margin="0,0,6,0" Foreground="#89b4fa" FontSize="13"/>
+                            <TextBlock Grid.Column="0" Text="&#xE721;" FontFamily="Segoe MDL2 Assets, Segoe UI Symbol" VerticalAlignment="Center" Margin="0,0,6,0" Foreground="#89b4fa" FontSize="12"/>
                             <TextBox x:Name="txtSearchInstall" Grid.Column="1" Style="{StaticResource SearchBoxStyle}" Margin="0,0,6,0" ToolTip="Cerca software per nome o ID"/>
                             <ComboBox x:Name="cmbCategoryFilter" Grid.Column="2" Style="{StaticResource ComboStyle}" MinWidth="130" Height="26" Margin="0"/>
                         </Grid>
@@ -2040,7 +2040,7 @@ $xaml = @"
                                 <ColumnDefinition Width="Auto"/>
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" Text="🔍" VerticalAlignment="Center" Margin="0,0,6,0" Foreground="#f38ba8" FontSize="13"/>
+                            <TextBlock Grid.Column="0" Text="&#xE721;" FontFamily="Segoe MDL2 Assets, Segoe UI Symbol" VerticalAlignment="Center" Margin="0,0,6,0" Foreground="#f38ba8" FontSize="12"/>
                             <TextBox x:Name="txtSearchBloat" Grid.Column="1" Style="{StaticResource SearchBoxStyle}" ToolTip="Cerca bloatware"/>
                         </Grid>
                     </StackPanel>
