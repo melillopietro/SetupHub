@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: GPL-3.0-only
+# SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2026 Pietro Melillo
 <#
 .SYNOPSIS
@@ -10,7 +10,11 @@
     Pietro Melillo
 .NOTES
     Requires Windows 10 1909+ / Windows 11, PowerShell 5.1+, Administrator privileges and WinGet.
-    v1.1 includes:
+    v1.2.1 includes:
+    - Reworked WinGet bootstrap: Microsoft.WinGet.Client / Repair-WinGetPackageManager first, safe MSIX fallback second.
+    - Removed the 12-second forced termination of Windows App Runtime installer.
+    - Added explicit bootstrap diagnostics and final functional verification.
+    Previous v1.1 features include:
     - Automatic Windows App Runtime 1.8+ bootstrap to resolve 0x80073CF3 dependency errors.
     - Automatic AppX environment repair to resolve 0x80073CF9 staging errors.
     - Zero-crash resilient bootstrap with permission-safe AppX discovery.
@@ -38,7 +42,7 @@ param(
 #region === BASE CONFIGURATION ===
 $ErrorActionPreference = 'Continue'
 $script:AppName = 'SetupHub'
-$script:AppVersion = '1.2.0'
+$script:AppVersion = '1.2.1'
 $script:LicenseName = 'GNU General Public License v3.0 only'
 $script:LicenseSpdx = 'GPL-3.0-only'
 $script:AuthorName = 'Pietro Melillo'
@@ -174,7 +178,7 @@ $script:Text = @{
         ProfileLoaded = 'Profilo caricato'
         InsertProfileName = 'Inserisci il nome del profilo personalizzato:'
         ProfileNameTitle = 'Nuovo profilo'
-        Footer = 'Creato da Pietro Melillo | Powered by WinGet | SetupHub v1.1'
+        Footer = 'Creato da Pietro Melillo | Powered by WinGet | SetupHub v1.2.1'
     }
     en = @{
         WindowTitle = 'SetupHub — Windows Installer, Profiles and Debloater'
@@ -239,7 +243,7 @@ $script:Text = @{
         ProfileLoaded = 'Profile loaded'
         InsertProfileName = 'Enter the custom profile name:'
         ProfileNameTitle = 'New profile'
-        Footer = 'Created by Pietro Melillo | Powered by WinGet | SetupHub v1.1'
+        Footer = 'Created by Pietro Melillo | Powered by WinGet | SetupHub v1.2.1'
     }
 }
 function T([string]$Key) { return $script:Text[$script:Lang][$Key] }
@@ -664,10 +668,11 @@ $bloatwarePackages = @(
 )
 #endregion
 
-#region === WINGET BOOTSTRAP (NON-BLOCKING & RESILIENT) ===
+#region === WINGET BOOTSTRAP (OFFICIAL REPAIR + SAFE FALLBACK) ===
 function Install-WinGetBootstrap {
     param([bool]$ShowGui = $true)
-    Repair-AppXEnvironment
+
+    $script:WinGetWarningMsg = ''
     $splashWindow = $null
     $lblSplashStatus = $null
     $lblSplashDetail = $null
@@ -686,6 +691,17 @@ function Install-WinGetBootstrap {
             try { [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background) } catch {}
         } else {
             Write-Host "$Status $Detail" -ForegroundColor Cyan
+        }
+    }
+
+    function Add-WinGetBootstrapWarning {
+        param([string]$Message)
+        if ([string]::IsNullOrWhiteSpace($Message)) { return }
+        Write-Warning $Message
+        if ([string]::IsNullOrWhiteSpace($script:WinGetWarningMsg)) {
+            $script:WinGetWarningMsg = $Message
+        } else {
+            $script:WinGetWarningMsg += " | $Message"
         }
     }
 
@@ -718,142 +734,200 @@ function Install-WinGetBootstrap {
             Update-Splash -Status "Preparazione ambiente..." -Detail "Verifica preliminare dei prerequisiti..."
         } catch {}
     } else {
-        Write-Host "Installazione e configurazione WinGet / Windows App Runtime in corso..." -ForegroundColor Cyan
+        Write-Host "Verifica e configurazione WinGet in corso..." -ForegroundColor Cyan
     }
 
     try {
-        $progressPreference = 'SilentlyContinue'
         Repair-AppXEnvironment
-        
-        # 1. Scarica e installa pacchetto ufficiale completo dipendenze WinGet (VCLibs 140.00 / UWPDesktop e WindowsAppRuntime)
-        Update-Splash -Status "Configurazione componenti di base (1/4)" -Detail "Download dipendenze ufficiali Microsoft (VCLibs & WindowsAppRuntime)..."
-        $dependencies = @()
+        $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('PATH','User') + ";$env:LOCALAPPDATA\Microsoft\WindowsApps"
+
+        # 1. Non modificare nulla se WinGet e' gia' realmente operativo.
+        Update-Splash -Status "Verifica WinGet (1/4)" -Detail "Controllo dell'installazione esistente..." -Progress 10
+        if (Test-WinGetAvailable) {
+            $script:WinGetAvailable = $true
+            Update-Splash -Status "WinGet pronto" -Detail "Windows Package Manager e' gia' operativo." -Progress 100
+            return
+        }
+
+        # 2. Metodo Microsoft preferito: Microsoft.WinGet.Client + Repair-WinGetPackageManager.
+        $officialRepairSucceeded = $false
         try {
-            $latestRelease = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -UseBasicParsing -TimeoutSec 15
-            $depsAsset = $latestRelease.assets | Where-Object { $_.name -match 'Dependencies\.zip$' } | Select-Object -First 1
-            if ($depsAsset) {
-                $depsZip = "$env:TEMP\DesktopAppInstaller_Dependencies.zip"
-                $depsExtract = "$env:TEMP\winget_deps"
-                Invoke-WebRequest -Uri $depsAsset.browser_download_url -OutFile $depsZip -UseBasicParsing -TimeoutSec 45
-                if (Test-Path $depsZip) {
-                    if (Test-Path $depsExtract) { Remove-Item -Path $depsExtract -Recurse -Force -ErrorAction SilentlyContinue }
-                    Expand-Archive -Path $depsZip -DestinationPath $depsExtract -Force -ErrorAction SilentlyContinue
-                    $x64Deps = Get-ChildItem -Path $depsExtract -Recurse -Filter '*.appx' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'x64' -or $_.FullName -match 'neutral' }
-                    foreach ($dep in $x64Deps) {
-                        try { Add-AppxPackage -Path $dep.FullName -ErrorAction SilentlyContinue } catch {}
-                        $dependencies += $dep.FullName
+            Update-Splash -Status "Riparazione ufficiale WinGet (2/4)" -Detail "Preparazione Microsoft.WinGet.Client..." -Progress 25
+
+            try {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+            } catch {}
+
+            if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Confirm:$false -ErrorAction Stop | Out-Null
+            }
+
+            if (-not (Get-Module -ListAvailable -Name Microsoft.WinGet.Client)) {
+                Install-Module -Name Microsoft.WinGet.Client -Repository PSGallery -Scope AllUsers -Force -AllowClobber -Confirm:$false -ErrorAction Stop
+            }
+
+            Import-Module Microsoft.WinGet.Client -Force -ErrorAction Stop
+            $repairCommand = Get-Command Repair-WinGetPackageManager -ErrorAction Stop
+            if (-not $repairCommand) { throw 'Repair-WinGetPackageManager non disponibile dopo il caricamento del modulo Microsoft.WinGet.Client.' }
+
+            Update-Splash -Status "Riparazione ufficiale WinGet (2/4)" -Detail "Installazione/riparazione Windows Package Manager..." -Progress 40
+            Repair-WinGetPackageManager -AllUsers -Latest -Force -ErrorAction Stop | Out-Null
+
+            $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('PATH','User') + ";$env:LOCALAPPDATA\Microsoft\WindowsApps"
+            [void](Resolve-WinGetEnvironment)
+            Start-Sleep -Seconds 2
+            $officialRepairSucceeded = Test-WinGetAvailable
+        } catch {
+            Add-WinGetBootstrapWarning "Riparazione ufficiale WinGet non riuscita: $($_.Exception.Message)"
+        }
+
+        if ($officialRepairSucceeded) {
+            Update-Splash -Status "WinGet ripristinato (3/4)" -Detail "Il metodo Microsoft ha completato correttamente la configurazione." -Progress 75
+        } else {
+            # 3. Fallback manuale. Viene eseguito solo quando il metodo ufficiale non e' sufficiente.
+            Update-Splash -Status "Fallback WinGet (3/4)" -Detail "Installazione sicura delle dipendenze AppX/MSIX..." -Progress 55
+            $dependencies = New-Object System.Collections.Generic.List[string]
+            $latestRelease = $null
+
+            try {
+                $latestRelease = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+            } catch {
+                Add-WinGetBootstrapWarning "Impossibile recuperare la release WinGet da GitHub: $($_.Exception.Message)"
+            }
+
+            # Dipendenze ufficiali della release WinGet.
+            if ($latestRelease) {
+                try {
+                    $depsAsset = $latestRelease.assets | Where-Object { $_.name -match 'Dependencies\.zip$' } | Select-Object -First 1
+                    if ($depsAsset) {
+                        $depsZip = Join-Path $env:TEMP 'DesktopAppInstaller_Dependencies.zip'
+                        $depsExtract = Join-Path $env:TEMP 'winget_deps'
+                        Invoke-WebRequest -Uri $depsAsset.browser_download_url -OutFile $depsZip -UseBasicParsing -TimeoutSec 90 -ErrorAction Stop
+                        if (Test-Path $depsExtract) { Remove-Item -Path $depsExtract -Recurse -Force -ErrorAction SilentlyContinue }
+                        Expand-Archive -Path $depsZip -DestinationPath $depsExtract -Force -ErrorAction Stop
+
+                        $x64Deps = Get-ChildItem -Path $depsExtract -Recurse -Filter '*.appx' -ErrorAction Stop | Where-Object {
+                            $_.FullName -match '(?i)(x64|neutral)' -and $_.FullName -notmatch '(?i)(arm64|x86)'
+                        }
+                        foreach ($dep in $x64Deps) {
+                            try {
+                                Add-AppxPackage -Path $dep.FullName -ErrorAction Stop
+                                if (-not $dependencies.Contains($dep.FullName)) { [void]$dependencies.Add($dep.FullName) }
+                            } catch {
+                                # 0x80073D06 / version already installed is harmless; other failures are logged.
+                                if ($_.Exception.Message -notmatch '(?i)(higher version|already installed|0x80073D06)') {
+                                    Add-WinGetBootstrapWarning "Dipendenza AppX non installata ($($dep.Name)): $($_.Exception.Message)"
+                                }
+                                if (-not $dependencies.Contains($dep.FullName)) { [void]$dependencies.Add($dep.FullName) }
+                            }
+                        }
                     }
+                } catch {
+                    Add-WinGetBootstrapWarning "Installazione dipendenze WinGet non riuscita: $($_.Exception.Message)"
                 }
             }
-        } catch {}
 
-        # Fallback VCLibs standalone
-        $vcLibsPath = "$env:TEMP\Microsoft.VCLibs.x64.14.00.Desktop.appx"
-        if (-not (Test-Path $vcLibsPath)) {
+            # VCLibs fallback standalone.
             try {
-                Invoke-WebRequest -Uri 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx' -OutFile $vcLibsPath -UseBasicParsing -TimeoutSec 15
-                Add-AppxPackage -Path $vcLibsPath -ErrorAction SilentlyContinue
-            } catch {}
-        }
-        if (Test-Path $vcLibsPath -and -not ($dependencies -contains $vcLibsPath)) { $dependencies += $vcLibsPath }
-        Update-Splash -Status "Configurazione componenti di base (1/4)" -Detail "Componenti di base pronti."
+                $vcLibsPath = Join-Path $env:TEMP 'Microsoft.VCLibs.x64.14.00.Desktop.appx'
+                Invoke-WebRequest -Uri 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx' -OutFile $vcLibsPath -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
+                try { Add-AppxPackage -Path $vcLibsPath -ErrorAction Stop } catch {
+                    if ($_.Exception.Message -notmatch '(?i)(higher version|already installed|0x80073D06)') { throw }
+                }
+                if (-not $dependencies.Contains($vcLibsPath)) { [void]$dependencies.Add($vcLibsPath) }
+            } catch {
+                Add-WinGetBootstrapWarning "VCLibs fallback non installato: $($_.Exception.Message)"
+            }
 
-        # 2. Microsoft Windows App SDK / Windows App Runtime 1.8+ (risolve l'errore 0x80073CF3 di DesktopAppInstaller)
-        Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Verifica Windows App Runtime..."
-        $existingWasdk = Get-AppxPackage -Name '*WindowsAppRuntime.1.8*' -ErrorAction SilentlyContinue
-        if ($existingWasdk) {
-            Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Windows App Runtime 1.8 già installato."
-        } else {
-            $wasdkInstaller = "$env:TEMP\WindowsAppRuntimeInstall-x64.exe"
+            # Windows App Runtime: nessun kill dopo 12 secondi. L'installer deve terminare normalmente.
             try {
-                Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Download Microsoft Windows App Runtime 1.8..."
-                Invoke-WebRequest -Uri 'https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe' -OutFile $wasdkInstaller -UseBasicParsing -TimeoutSec 25
-                if (Test-Path $wasdkInstaller) {
-                    Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Esecuzione installatore runtime..."
-                    $p = Start-Process -FilePath $wasdkInstaller -ArgumentList '--quiet --force' -PassThru -ErrorAction SilentlyContinue
-                    if ($p) {
-                        $maxSeconds = 12
-                        $elapsed = 0
-                        while (-not $p.HasExited -and $elapsed -lt $maxSeconds) {
-                            Start-Sleep -Seconds 1
-                            $elapsed++
-                            Update-Splash -Status "Installazione Windows App Runtime (2/4)" -Detail "Installazione runtime in corso ($($maxSeconds - $elapsed)s)..."
-                        }
-                        if (-not $p.HasExited) {
-                            try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
-                        }
+                $existingRuntime = Get-AppxPackage -AllUsers -Name '*WindowsAppRuntime*' -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+                if (-not $existingRuntime) {
+                    Update-Splash -Status "Fallback WinGet (3/4)" -Detail "Installazione Windows App Runtime..." -Progress 62
+                    $wasdkInstaller = Join-Path $env:TEMP 'WindowsAppRuntimeInstall-x64.exe'
+                    Invoke-WebRequest -Uri 'https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe' -OutFile $wasdkInstaller -UseBasicParsing -TimeoutSec 90 -ErrorAction Stop
+                    $p = Start-Process -FilePath $wasdkInstaller -ArgumentList '--quiet --force' -PassThru -ErrorAction Stop
+                    $p.WaitForExit()
+                    if ($p.ExitCode -ne 0) {
+                        throw "Windows App Runtime installer ha restituito ExitCode=$($p.ExitCode)."
                     }
                 }
-            } catch {}
-        }
+            } catch {
+                Add-WinGetBootstrapWarning "Windows App Runtime non installato correttamente: $($_.Exception.Message)"
+            }
 
-        # 3. Microsoft DesktopAppInstaller (WinGet) da GitHub Releases
-        Update-Splash -Status "Download WinGet Package Manager (3/4)" -Detail "Recupero dell'ultima release di DesktopAppInstaller..."
-        try {
-            $latestRelease = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -UseBasicParsing -TimeoutSec 15
-            $msixBundleAsset = $latestRelease.assets | Where-Object { $_.name -match '\.msixbundle$' } | Select-Object -First 1
-            $licenseAsset = $latestRelease.assets | Where-Object { $_.name -match 'License.*\.xml$' } | Select-Object -First 1
-            $msixPath = "$env:TEMP\Microsoft.DesktopAppInstaller.msixbundle"
-            
-            if ($msixBundleAsset) {
-                Update-Splash -Status "Download WinGet Package Manager (3/4)" -Detail "Scaricamento del pacchetto DesktopAppInstaller..."
-                Invoke-WebRequest -Uri $msixBundleAsset.browser_download_url -OutFile $msixPath -UseBasicParsing -TimeoutSec 60
-
-                Repair-AppXEnvironment
-                if ($licenseAsset) {
-                    $licensePath = "$env:TEMP\WinGet_License.xml"
-                    Invoke-WebRequest -Uri $licenseAsset.browser_download_url -OutFile $licensePath -UseBasicParsing -TimeoutSec 15
-                    try {
-                        if ($dependencies.Count -gt 0) {
-                            Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -DependencyPackagePath $dependencies -ErrorAction Stop | Out-Null
-                        } else {
-                            Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -ErrorAction Stop | Out-Null
-                        }
-                    } catch {
-                        Repair-AppXEnvironment
-                        if ($dependencies.Count -gt 0) {
-                            Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -DependencyPackagePath $dependencies -ErrorAction SilentlyContinue | Out-Null
-                        } else {
-                            Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -ErrorAction SilentlyContinue | Out-Null
-                        }
-                    }
-                }
-                Update-Splash -Status "Registrazione WinGet nel sistema (3/4)" -Detail "Installazione del pacchetto DesktopAppInstaller..."
+            # DesktopAppInstaller / WinGet.
+            if ($latestRelease) {
                 try {
+                    $msixBundleAsset = $latestRelease.assets | Where-Object { $_.name -match '\.msixbundle$' } | Select-Object -First 1
+                    $licenseAsset = $latestRelease.assets | Where-Object { $_.name -match 'License.*\.xml$' } | Select-Object -First 1
+                    if (-not $msixBundleAsset) { throw 'Asset MSIXBundle DesktopAppInstaller non trovato nella release WinGet.' }
+
+                    $msixPath = Join-Path $env:TEMP 'Microsoft.DesktopAppInstaller.msixbundle'
+                    Update-Splash -Status "Fallback WinGet (3/4)" -Detail "Installazione Microsoft DesktopAppInstaller..." -Progress 68
+                    Invoke-WebRequest -Uri $msixBundleAsset.browser_download_url -OutFile $msixPath -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+
+                    # Provisioning per tutti gli utenti quando la licenza e' disponibile.
+                    if ($licenseAsset) {
+                        try {
+                            $licensePath = Join-Path $env:TEMP 'WinGet_License.xml'
+                            Invoke-WebRequest -Uri $licenseAsset.browser_download_url -OutFile $licensePath -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
+                            if ($dependencies.Count -gt 0) {
+                                Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -DependencyPackagePath @($dependencies) -ErrorAction Stop | Out-Null
+                            } else {
+                                Add-AppxProvisionedPackage -Online -PackagePath $msixPath -LicensePath $licensePath -ErrorAction Stop | Out-Null
+                            }
+                        } catch {
+                            Add-WinGetBootstrapWarning "Provisioning DesktopAppInstaller non completato: $($_.Exception.Message)"
+                        }
+                    }
+
+                    Repair-AppXEnvironment
                     if ($dependencies.Count -gt 0) {
-                        Add-AppxPackage -Path $msixPath -DependencyPath $dependencies -ForceApplicationShutdown -ErrorAction Stop
+                        Add-AppxPackage -Path $msixPath -DependencyPath @($dependencies) -ForceApplicationShutdown -ErrorAction Stop
                     } else {
                         Add-AppxPackage -Path $msixPath -ForceApplicationShutdown -ErrorAction Stop
                     }
                 } catch {
-                    Repair-AppXEnvironment
-                    Start-Sleep -Seconds 1
-                    if ($dependencies.Count -gt 0) {
-                        Add-AppxPackage -Path $msixPath -DependencyPath $dependencies -ForceApplicationShutdown -ErrorAction SilentlyContinue
-                    } else {
-                        Add-AppxPackage -Path $msixPath -ForceApplicationShutdown -ErrorAction SilentlyContinue
-                    }
+                    Add-WinGetBootstrapWarning "Installazione DesktopAppInstaller non riuscita: $($_.Exception.Message)"
                 }
             }
-        } catch {}
-        
-        # 4. Aggiorna PATH e reimposta sorgenti WinGet
-        Update-Splash -Status "Finalizzazione ambiente (4/4)" -Detail "Aggiornamento variabili d'ambiente e sorgenti..."
+        }
+
+        # 4. Verifica reale finale e sorgenti. Non dichiarare successo senza 'winget --version'.
+        Update-Splash -Status "Verifica finale WinGet (4/4)" -Detail "Aggiornamento PATH, registrazione e controllo sorgenti..." -Progress 85
+        Repair-AppXEnvironment
         $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('PATH','User') + ";$env:LOCALAPPDATA\Microsoft\WindowsApps"
         [void](Resolve-WinGetEnvironment)
-        Start-Sleep -Seconds 1
-        try {
-            [void](Invoke-WinGetCli -Arguments 'source reset --force')
-        } catch {}
+        Start-Sleep -Seconds 2
+        $script:WinGetAvailable = Test-WinGetAvailable
+
+        if ($script:WinGetAvailable) {
+            try { [void](Invoke-WinGetCli -Arguments 'source reset --force') } catch { Add-WinGetBootstrapWarning "Reset sorgenti WinGet non riuscito: $($_.Exception.Message)" }
+            try { [void](Invoke-WinGetCli -Arguments 'source update') } catch { Add-WinGetBootstrapWarning "Aggiornamento sorgenti WinGet non riuscito: $($_.Exception.Message)" }
+            Update-Splash -Status "WinGet pronto" -Detail "Installazione verificata correttamente." -Progress 100
+        } else {
+            if ([string]::IsNullOrWhiteSpace($script:WinGetWarningMsg)) {
+                $script:WinGetWarningMsg = 'WinGet non risponde a --version dopo i tentativi di riparazione.'
+            }
+            Update-Splash -Status "WinGet non operativo" -Detail $script:WinGetWarningMsg -Progress 100
+        }
     } catch {
-        $script:WinGetWarningMsg = $_.Exception.Message
-        Write-Warning "Avviso bootstrap WinGet: $($_.Exception.Message)"
+        Add-WinGetBootstrapWarning "Errore bootstrap WinGet: $($_.Exception.Message)"
+        $script:WinGetAvailable = $false
+    } finally {
+        if ($splashWindow) {
+            try {
+                Start-Sleep -Milliseconds 500
+                $splashWindow.Close()
+            } catch {}
+        }
     }
-    
-    if ($splashWindow) { try { $splashWindow.Close() } catch {} }
-    Start-Sleep -Milliseconds 300
-    
-    $script:WinGetAvailable = Test-WinGetAvailable
+
+    # Una sola verifica conclusiva, basata sull'esecuzione reale del client.
+    if (-not $script:WinGetAvailable) {
+        $script:WinGetAvailable = Test-WinGetAvailable
+    }
 }
 
 # Run bootstrap check gracefully (never aborts or exits)
@@ -2075,7 +2149,7 @@ $xaml = @"
 
         <!-- Footer -->
         <Border Grid.Row="6" Background="#181825" Padding="10,6">
-            <TextBlock x:Name="lblFooter" Text="Creato da Pietro Melillo | Powered by WinGet | SetupHub v1.1" Foreground="#6c7086" FontSize="10" HorizontalAlignment="Center"/>
+            <TextBlock x:Name="lblFooter" Text="Creato da Pietro Melillo | Powered by WinGet | SetupHub v1.2.1" Foreground="#6c7086" FontSize="10" HorizontalAlignment="Center"/>
         </Border>
     </Grid>
 </Window>
@@ -2437,39 +2511,29 @@ $btnCancel.Add_Click({ $window.Close() })
 if ($btnRepairWinGet) {
     $btnRepairWinGet.Add_Click({
         $btnRepairWinGet.IsEnabled = $false
-        $lblWinGetWarning.Text = "Riparazione e registrazione componenti WinGet in corso..."
+        $lblWinGetWarning.Text = if ($script:Lang -eq 'it') { 'Riparazione WinGet in corso...' } else { 'Repairing WinGet...' }
         [System.Windows.Forms.Application]::DoEvents()
-        
-        # 1. Ripara ambiente AppX
-        Repair-AppXEnvironment
-        
-        # 2. Re-registra i manifest dei pacchetti WindowsAppRuntime e DesktopAppInstaller
+
+        # Usa la stessa routine robusta impiegata all'avvio: metodo Microsoft + fallback sicuro.
         try {
-            Get-AppxPackage -AllUsers *WindowsAppRuntime* -ErrorAction SilentlyContinue | ForEach-Object {
-                Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml" -ErrorAction SilentlyContinue
-            }
-            Get-AppxPackage -AllUsers *DesktopAppInstaller* -ErrorAction SilentlyContinue | ForEach-Object {
-                Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml" -ErrorAction SilentlyContinue
-            }
-        } catch {}
-        
-        # 3. Reimposta sorgenti WinGet
-        try {
-            & winget source reset --force 2>$null | Out-Null
-        } catch {}
-        
-        # 4. Verifica nuovamente WinGet
-        $ready = Resolve-WinGetEnvironment
-        if ($ready) {
-            $script:WinGetAvailable = $true
+            Install-WinGetBootstrap -ShowGui $false
+        } catch {
+            $script:WinGetAvailable = $false
+            $script:WinGetWarningMsg = $_.Exception.Message
+        }
+
+        if ($script:WinGetAvailable) {
             $bannerWinGetWarning.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#a6e3a1')
-            $lblWinGetWarning.Text = "WinGet ripristinato e pronto all'uso!"
+            $lblWinGetWarning.Text = if ($script:Lang -eq 'it') { 'WinGet ripristinato e pronto all''uso!' } else { 'WinGet repaired and ready!' }
             $btnRepairWinGet.Visibility = [System.Windows.Visibility]::Collapsed
-            [System.Windows.MessageBox]::Show("WinGet e' stato configurato e agganciato correttamente!", $script:AppName, 'OK', 'Information') | Out-Null
+            $okMessage = if ($script:Lang -eq 'it') { "WinGet e' stato installato/riparato e verificato correttamente." } else { 'WinGet was installed/repaired and verified successfully.' }
+            [System.Windows.MessageBox]::Show($okMessage, $script:AppName, 'OK', 'Information') | Out-Null
         } else {
             $btnRepairWinGet.IsEnabled = $true
             $lblWinGetWarning.Text = (T 'WinGetWarningBanner')
-            [System.Windows.MessageBox]::Show("I file di WinGet sono stati registrati, ma potrebbe essere necessario un riavvio di Windows per rendere operative le dipendenze.", $script:AppName, 'OK', 'Warning') | Out-Null
+            $detail = if ([string]::IsNullOrWhiteSpace($script:WinGetWarningMsg)) { 'Verifica funzionale WinGet non superata.' } else { $script:WinGetWarningMsg }
+            $failMessage = if ($script:Lang -eq 'it') { "WinGet non e' ancora operativo.`n`nDettaglio:`n$detail" } else { "WinGet is not operational yet.`n`nDetails:`n$detail" }
+            [System.Windows.MessageBox]::Show($failMessage, $script:AppName, 'OK', 'Warning') | Out-Null
         }
     })
 }
