@@ -42,7 +42,7 @@ param(
 #region === BASE CONFIGURATION ===
 $ErrorActionPreference = 'Continue'
 $script:AppName = 'SetupHub'
-$script:AppVersion = '1.2.1'
+$script:AppVersion = '1.2.2'
 $script:LicenseName = 'GNU General Public License v3.0 only'
 $script:LicenseSpdx = 'GPL-3.0-only'
 $script:AuthorName = 'Pietro Melillo'
@@ -178,7 +178,7 @@ $script:Text = @{
         ProfileLoaded = 'Profilo caricato'
         InsertProfileName = 'Inserisci il nome del profilo personalizzato:'
         ProfileNameTitle = 'Nuovo profilo'
-        Footer = 'Creato da Pietro Melillo | Powered by WinGet | SetupHub v1.2.1'
+        Footer = 'Creato da Pietro Melillo | Powered by WinGet | SetupHub v1.2.2'
     }
     en = @{
         WindowTitle = 'SetupHub — Windows Installer, Profiles and Debloater'
@@ -243,7 +243,7 @@ $script:Text = @{
         ProfileLoaded = 'Profile loaded'
         InsertProfileName = 'Enter the custom profile name:'
         ProfileNameTitle = 'New profile'
-        Footer = 'Created by Pietro Melillo | Powered by WinGet | SetupHub v1.2.1'
+        Footer = 'Created by Pietro Melillo | Powered by WinGet | SetupHub v1.2.2'
     }
 }
 function T([string]$Key) { return $script:Text[$script:Lang][$Key] }
@@ -758,15 +758,19 @@ function Install-WinGetBootstrap {
                 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
             } catch {}
 
-            if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
-                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Confirm:$false -ErrorAction Stop | Out-Null
+            # Non usare Install-PackageProvider/Install-Module qui: su Windows PowerShell 5.1
+            # PackageManagement puo' aprire il prompt interattivo per il provider NuGet e bloccare
+            # completamente SetupHub. Il metodo Microsoft viene usato solo se il modulo e' gia'
+            # disponibile; altrimenti si passa automaticamente al fallback MSIX/AppX ufficiale.
+            $winGetClientModule = Get-Module -ListAvailable -Name Microsoft.WinGet.Client |
+                Sort-Object Version -Descending |
+                Select-Object -First 1
+
+            if (-not $winGetClientModule) {
+                throw 'Microsoft.WinGet.Client non presente: salto installazione via PowerShell Gallery per evitare prompt NuGet e uso il fallback MSIX/AppX.'
             }
 
-            if (-not (Get-Module -ListAvailable -Name Microsoft.WinGet.Client)) {
-                Install-Module -Name Microsoft.WinGet.Client -Repository PSGallery -Scope AllUsers -Force -AllowClobber -Confirm:$false -ErrorAction Stop
-            }
-
-            Import-Module Microsoft.WinGet.Client -Force -ErrorAction Stop
+            Import-Module $winGetClientModule.Path -Force -ErrorAction Stop
             $repairCommand = Get-Command Repair-WinGetPackageManager -ErrorAction Stop
             if (-not $repairCommand) { throw 'Repair-WinGetPackageManager non disponibile dopo il caricamento del modulo Microsoft.WinGet.Client.' }
 
@@ -2149,7 +2153,7 @@ $xaml = @"
 
         <!-- Footer -->
         <Border Grid.Row="6" Background="#181825" Padding="10,6">
-            <TextBlock x:Name="lblFooter" Text="Creato da Pietro Melillo | Powered by WinGet | SetupHub v1.2.1" Foreground="#6c7086" FontSize="10" HorizontalAlignment="Center"/>
+            <TextBlock x:Name="lblFooter" Text="Creato da Pietro Melillo | Powered by WinGet | SetupHub v1.2.2" Foreground="#6c7086" FontSize="10" HorizontalAlignment="Center"/>
         </Border>
     </Grid>
 </Window>
